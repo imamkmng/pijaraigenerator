@@ -742,7 +742,7 @@ const COGNITIVE_LEVELS = [
   'HOTS (C4-C6: Menganalisis, Mengevaluasi, Mencipta)'
 ];
 
-export type AIProvider = 'gemini' | 'groq' | 'deepseek' | 'openai' | 'openrouter' | 'custom';
+export type AIProvider = 'gemini' | 'groq' | 'deepseek' | 'openai' | 'openrouter' | '9router' | 'custom';
 
 export interface AIProviderConfig {
   id: AIProvider;
@@ -864,6 +864,30 @@ export const AI_PROVIDERS: AIProviderConfig[] = [
     ]
   },
   {
+    id: '9router',
+    name: '9router',
+    tagline: 'Gateway AI mandiri & proxy multi-provider (40+ LLM)',
+    defaultBaseUrl: 'http://localhost:20128/v1',
+    keyPlaceholder: 'API Key (opsional / jika diproteksi token)',
+    keyUrl: 'http://localhost:20128',
+    keyUrlLabel: 'Dashboard 9router (Localhost)',
+    defaultModel: 'gemini-2.5-flash',
+    fastModel: 'gemini-2.0-flash',
+    reasoningModel: 'claude-3-7-sonnet',
+    models: [
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', desc: 'Rute via 9router' },
+      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', desc: 'Rute via 9router' },
+      { id: 'claude-3-7-sonnet', name: 'Claude 3.7 Sonnet', desc: 'Rute via 9router' },
+      { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', desc: 'Rute via 9router' },
+      { id: 'deepseek-chat', name: 'DeepSeek V3', desc: 'Rute via 9router' },
+      { id: 'deepseek-reasoner', name: 'DeepSeek R1', desc: 'Rute via 9router' },
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini', desc: 'Rute via 9router' },
+      { id: 'gpt-4o', name: 'GPT-4o Flagship', desc: 'Rute via 9router' },
+      { id: 'qwen-2.5-72b', name: 'Qwen 2.5 72B', desc: 'Rute via 9router' },
+      { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', desc: 'Rute via 9router' }
+    ]
+  },
+  {
     id: 'custom',
     name: 'Custom (Ollama / Local LLM / Lainnya)',
     tagline: 'Gunakan server lokal Ollama, LM Studio, vLLM, atau proxy Anda',
@@ -892,6 +916,7 @@ export function detectProviderFromKey(key: string): AIProvider | null {
   if (clean.startsWith('sk-or-')) return 'openrouter';
   if (clean.startsWith('sk-proj-')) return 'openai';
   if (clean.startsWith('sk-')) return 'deepseek';
+  if (clean.startsWith('9r-') || clean.startsWith('9router')) return '9router';
   return null;
 }
 
@@ -1520,24 +1545,115 @@ export default function App() {
     };
   };
 
-  // Helper to repair common AI JSON flaws (LaTeX backslashes, trailing commas, raw newlines)
+  // Helper to extract questions from plain text if AI answered in conversational/markdown format instead of strict JSON
+  const parseFromPlainText = (text: string): QuestionData[] => {
+    if (!text || typeof text !== 'string') return [];
+
+    const cleaned = text
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+      .replace(/```(?:json)?/gi, '')
+      .trim();
+
+    // Pattern: splits questions by numbers like "1.", "1)", "Soal 1:", "**1.**"
+    const questionBlocks = cleaned.split(/(?:^|\n)\s*(?:\*\*)?(?:Soal\s*)?(\d+)[\.\:\)]\s*(?:\*\*)?/i);
+
+    const results: QuestionData[] = [];
+    if (questionBlocks.length > 2) {
+      for (let i = 1; i < questionBlocks.length; i += 2) {
+        const qNum = parseInt(questionBlocks[i]) || Math.floor(i / 2) + 1;
+        const blockContent = questionBlocks[i + 1] || '';
+
+        // Extract Options: A., B., C., D., E., F.
+        let soalText = blockContent;
+        const options: Record<string, string> = {};
+
+        const optRegex = /(?:^|\n)\s*(?:\*\*)?([A-F])[\.\:\)]\s*(?:\*\*)?([^\n]+)/gi;
+        let optMatch;
+        let firstOptIdx = -1;
+        while ((optMatch = optRegex.exec(blockContent)) !== null) {
+          if (firstOptIdx === -1) firstOptIdx = optMatch.index;
+          const letter = optMatch[1].toUpperCase();
+          options[letter] = optMatch[2].trim();
+        }
+
+        if (firstOptIdx !== -1) {
+          soalText = blockContent.substring(0, firstOptIdx).trim();
+        }
+
+        // Extract answer key: "Kunci Jawaban: A" or "Jawaban: B" or "Kunci: C"
+        let kunci = '';
+        const keyMatch = blockContent.match(/(?:Kunci(?:[\s_]*Jawaban)?|Jawaban(?:[\s_]*Benar)?|Key|Answer)\s*[:=]\s*([A-Fa-f,\s]+)/i);
+        if (keyMatch) {
+          kunci = keyMatch[1].replace(/[^A-Fa-f,]/g, '').toUpperCase().trim();
+        }
+
+        // Extract essay answer if present
+        let essay = '';
+        const essayMatch = blockContent.match(/(?:Jawaban(?:[\s_]*Essay)?|Pedoman(?:[\s_]*Essay)?|Pembahasan|Penjelasan)\s*[:=]\s*([^\n]+)/i);
+        if (essayMatch) {
+          essay = essayMatch[1].trim();
+        }
+
+        // Clean soalText from leading prefixes like "Soal:", "Pertanyaan:"
+        soalText = soalText.replace(/^(?:Soal|Pertanyaan)\s*[:\-]\s*/i, '').trim();
+
+        if (soalText || Object.keys(options).length > 0) {
+          results.push(normalizeQuestionObject({
+            Nomor: qNum,
+            Jenis_Soal: 'PG',
+            Nilai: 10,
+            Nama_Materi: '',
+            Judul_Referensi: '',
+            Isi_Referensi: '',
+            Soal: soalText || `Soal nomor ${qNum}`,
+            File_Audio_Video: '',
+            Pilihan_A: options['A'] || '',
+            Pilihan_B: options['B'] || '',
+            Pilihan_C: options['C'] || '',
+            Pilihan_D: options['D'] || '',
+            Pilihan_E: options['E'] || '',
+            Pilihan_F: options['F'] || '',
+            Kunci_Jawaban_Non_Essay: kunci || 'A',
+            Jawaban_Essay: essay
+          }, results.length));
+        }
+      }
+    }
+    return results;
+  };
+
+  // Helper to repair common AI JSON flaws (LaTeX backslashes, trailing commas, raw newlines, smart quotes, python literals)
   const sanitizeJsonString = (str: string): string => {
+    if (!str || typeof str !== 'string') return '';
     let s = str;
     // 1. Remove thinking / reasoning tags (DeepSeek R1, Qwen, etc.)
     s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
     s = s.replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '');
 
-    // 2. Strip markdown fences
+    // 2. Strip markdown fences and code tags
     s = s.replace(/```(?:json)?\s*([\s\S]*?)\s*```/gi, '$1');
+    s = s.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
 
-    // 3. Fix LaTeX backslashes that break standard JSON parsing
+    // 3. Convert Python boolean/null literals to JSON
+    s = s.replace(/:\s*True\b/g, ': true');
+    s = s.replace(/:\s*False\b/g, ': false');
+    s = s.replace(/:\s*None\b/g, ': null');
+
+    // 4. Normalize smart quotes
+    s = s.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+
+    // 5. Fix LaTeX backslashes that break standard JSON parsing
     s = s.replace(/\\(frac|times|text|theta|tau|tan|triangle|begin|beta|bar|bullet|binom|right|rho|rad|root|forall|approx|alpha|le|ge|neq|pm|cdot|circ|degree|sqrt|partial|sum|int|infty|lim|sin|cos|log|ln|vec|hat|over|under)/gi, '\\\\$1');
     s = s.replace(/\\([a-zA-Z])/g, (m, letter) => {
       if (['b', 'f', 'n', 'r', 't', 'u'].includes(letter)) return m;
       return '\\\\' + letter;
     });
 
-    // 4. Fix raw newlines and tabs inside quoted JSON strings
+    // 6. Fix unquoted keys e.g. { Nomor: 1, Soal: "..." }
+    s = s.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
+
+    // 7. Fix raw newlines and tabs inside quoted JSON strings
     let inStr = false;
     let isEsc = false;
     let fixed = '';
@@ -1576,13 +1692,13 @@ export default function App() {
     }
     s = fixed;
 
-    // 5. Remove trailing commas before closing braces/brackets
+    // 8. Remove trailing commas before closing braces/brackets
     s = s.replace(/,\s*([\]}])/g, '$1');
 
     return s.trim();
   };
 
-  // Robust, multi-strategy JSON parser for questions array from any model (Gemini, Groq, DeepSeek, OpenAI, Ollama)
+  // Robust, multi-strategy JSON parser for questions array from any model (Gemini, Groq, DeepSeek, OpenAI, 9router, Ollama)
   const parseQuestionsJson = (rawText: string): QuestionData[] => {
     if (!rawText || typeof rawText !== 'string') {
       throw new Error('Respons model kosong.');
@@ -1605,7 +1721,7 @@ export default function App() {
         return val.map((item, idx) => normalizeQuestionObject(item, idx));
       }
       if (typeof val === 'object') {
-        const potentialKeys = ['questions', 'soal', 'data', 'items', 'daftar_soal', 'bank_soal', 'result', 'results'];
+        const potentialKeys = ['questions', 'soal', 'data', 'items', 'daftar_soal', 'bank_soal', 'result', 'results', 'output'];
         for (const k of potentialKeys) {
           if (Array.isArray(val[k]) && val[k].length > 0) {
             return val[k].map((item: any, idx: number) => normalizeQuestionObject(item, idx));
@@ -1696,26 +1812,59 @@ export default function App() {
       }
     }
 
-    // Strategy 6: Regex block extraction of individual question objects
+    // Strategy 6: Depth-aware brace matcher for individual objects (Handles LaTeX braces {} safely!)
     try {
-      const objectRegex = /\{[^{}]*"(?:Soal|soal|question|pertanyaan)"[^{}]*\}/g;
-      const matchedBlocks = cleanBase.match(objectRegex);
-      if (matchedBlocks && matchedBlocks.length > 0) {
-        const questions: QuestionData[] = [];
-        for (let i = 0; i < matchedBlocks.length; i++) {
-          try {
-            const cleanedBlock = sanitizeJsonString(matchedBlocks[i]);
-            const parsed = JSON.parse(cleanedBlock);
-            questions.push(normalizeQuestionObject(parsed, i));
-          } catch { }
+      const individualObjects: QuestionData[] = [];
+      let inString = false;
+      let isEsc = false;
+      let depth = 0;
+      let startPos = -1;
+
+      for (let i = 0; i < cleanBase.length; i++) {
+        const ch = cleanBase[i];
+        if (isEsc) {
+          isEsc = false;
+          continue;
         }
-        if (questions.length > 0) {
-          return questions;
+        if (ch === '\\') {
+          isEsc = true;
+          continue;
         }
+        if (ch === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (!inString) {
+          if (ch === '{') {
+            if (depth === 0) startPos = i;
+            depth++;
+          } else if (ch === '}') {
+            depth--;
+            if (depth === 0 && startPos !== -1) {
+              const block = cleanBase.substring(startPos, i + 1);
+              try {
+                const parsed = JSON.parse(sanitizeJsonString(block));
+                if (parsed && typeof parsed === 'object' && (parsed.Soal || parsed.soal || parsed.question || parsed.pertanyaan || parsed.Pilihan_A || parsed.A)) {
+                  individualObjects.push(normalizeQuestionObject(parsed, individualObjects.length));
+                }
+              } catch { }
+              startPos = -1;
+            }
+          }
+        }
+      }
+      if (individualObjects.length > 0) {
+        return individualObjects;
       }
     } catch { }
 
-    throw new Error('Respons model tidak mengandung format JSON array soal yang valid.');
+    // Strategy 7: Plain-text / Markdown Question Extractor (when model responds in natural numbered text)
+    const plainTextQuestions = parseFromPlainText(cleanBase);
+    if (plainTextQuestions.length > 0) {
+      return plainTextQuestions;
+    }
+
+    throw new Error('Respons model tidak mengandung format soal yang dapat dibaca. Silakan generate kembali.');
   };
 
   // Direct client-side generation fallback if serverless functions are not deployed
@@ -1724,7 +1873,7 @@ export default function App() {
     const apiKey = (payload.customApiKey || '').trim();
     const providerConfig = AI_PROVIDERS.find(p => p.id === provider) || AI_PROVIDERS[0];
 
-    if (provider !== 'custom' && !apiKey) {
+    if (provider !== 'custom' && provider !== '9router' && !apiKey) {
       throw new Error(`API Key untuk ${providerConfig.name} tidak ditemukan. Silakan masukkan API Key di Pengaturan AI.`);
     }
 
@@ -1899,6 +2048,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
             groq: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'gemma2-9b-it', 'mixtral-8x7b-32768'],
             openai: ['gpt-4o-mini', 'gpt-4o'],
             deepseek: ['deepseek-chat'],
+            '9router': ['gemini-2.5-flash', 'gemini-2.0-flash', 'gpt-4o-mini', 'deepseek-chat', 'claude-3-5-sonnet'],
             openrouter: ['google/gemini-2.0-flash-001', 'meta-llama/llama-3.3-70b-instruct:free', 'qwen/qwen-2.5-72b-instruct:free', 'mistralai/mistral-7b-instruct:free']
           };
 
@@ -2001,7 +2151,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!customApiKey && !hasServerKey && aiProvider !== 'custom') {
+    if (!customApiKey && !hasServerKey && aiProvider !== 'custom' && aiProvider !== '9router') {
       const pName = activeProviderConfig.name || 'AI';
       setError(`API Key untuk ${pName} belum dimasukkan. Silakan masukkan API Key Anda pada Pengaturan AI.`);
       setShowSettings(true);
@@ -2054,7 +2204,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
           body: JSON.stringify(payload)
         });
 
-        if (response.status === 404 && (customApiKey || aiProvider === 'custom')) {
+        if (response.status === 404 && (customApiKey || aiProvider === 'custom' || aiProvider === '9router')) {
           // Fallback to client-side direct request if backend functions not reachable
           data = await callAiClientSide(payload);
         } else {
@@ -2064,7 +2214,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
           }
         }
       } catch (networkOrApiError: any) {
-        if ((customApiKey || aiProvider === 'custom') && (networkOrApiError.message?.includes('Failed to fetch') || networkOrApiError.message?.toLowerCase().includes('fetch failed') || networkOrApiError.message?.includes('404'))) {
+        if ((customApiKey || aiProvider === 'custom' || aiProvider === '9router') && (networkOrApiError.message?.includes('Failed to fetch') || networkOrApiError.message?.toLowerCase().includes('fetch failed') || networkOrApiError.message?.includes('404'))) {
           data = await callAiClientSide(payload);
         } else {
           throw networkOrApiError;

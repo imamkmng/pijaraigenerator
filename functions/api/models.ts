@@ -20,7 +20,10 @@ function getDefaultBaseUrl(provider: string, customBaseUrl?: string): string {
   if (provider === 'custom') {
     return customBaseUrl?.trim() || 'http://localhost:11434/v1';
   }
-  if (customBaseUrl && customBaseUrl.trim() && !customBaseUrl.includes('localhost:11434')) {
+  if (provider === '9router') {
+    return customBaseUrl?.trim() || 'http://localhost:20128/v1';
+  }
+  if (customBaseUrl && customBaseUrl.trim() && !customBaseUrl.includes('localhost:11434') && !customBaseUrl.includes('localhost:20128')) {
     return customBaseUrl.trim();
   }
   switch (provider) {

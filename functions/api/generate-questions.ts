@@ -220,20 +220,114 @@ function normalizeQuestionObject(raw: any, index: number) {
   };
 }
 
+// Helper to extract questions from plain text if AI answered in conversational/markdown format instead of strict JSON
+function parseFromPlainText(text: string): any[] {
+  if (!text || typeof text !== 'string') return [];
+
+  const cleaned = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+    .replace(/```(?:json)?/gi, '')
+    .trim();
+
+  // Pattern: splits questions by numbers like "1.", "1)", "Soal 1:", "**1.**"
+  const questionBlocks = cleaned.split(/(?:^|\n)\s*(?:\*\*)?(?:Soal\s*)?(\d+)[\.\:\)]\s*(?:\*\*)?/i);
+
+  const results: any[] = [];
+  if (questionBlocks.length > 2) {
+    for (let i = 1; i < questionBlocks.length; i += 2) {
+      const qNum = parseInt(questionBlocks[i]) || Math.floor(i / 2) + 1;
+      const blockContent = questionBlocks[i + 1] || '';
+
+      // Extract Options: A., B., C., D., E., F.
+      let soalText = blockContent;
+      const options: Record<string, string> = {};
+
+      const optRegex = /(?:^|\n)\s*(?:\*\*)?([A-F])[\.\:\)]\s*(?:\*\*)?([^\n]+)/gi;
+      let optMatch;
+      let firstOptIdx = -1;
+      while ((optMatch = optRegex.exec(blockContent)) !== null) {
+        if (firstOptIdx === -1) firstOptIdx = optMatch.index;
+        const letter = optMatch[1].toUpperCase();
+        options[letter] = optMatch[2].trim();
+      }
+
+      if (firstOptIdx !== -1) {
+        soalText = blockContent.substring(0, firstOptIdx).trim();
+      }
+
+      // Extract answer key: "Kunci Jawaban: A" or "Jawaban: B" or "Kunci: C"
+      let kunci = '';
+      const keyMatch = blockContent.match(/(?:Kunci(?:[\s_]*Jawaban)?|Jawaban(?:[\s_]*Benar)?|Key|Answer)\s*[:=]\s*([A-Fa-f,\s]+)/i);
+      if (keyMatch) {
+        kunci = keyMatch[1].replace(/[^A-Fa-f,]/g, '').toUpperCase().trim();
+      }
+
+      // Extract essay answer if present
+      let essay = '';
+      const essayMatch = blockContent.match(/(?:Jawaban(?:[\s_]*Essay)?|Pedoman(?:[\s_]*Essay)?|Pembahasan|Penjelasan)\s*[:=]\s*([^\n]+)/i);
+      if (essayMatch) {
+        essay = essayMatch[1].trim();
+      }
+
+      // Clean soalText from leading prefixes like "Soal:", "Pertanyaan:"
+      soalText = soalText.replace(/^(?:Soal|Pertanyaan)\s*[:\-]\s*/i, '').trim();
+
+      if (soalText || Object.keys(options).length > 0) {
+        results.push(normalizeQuestionObject({
+          Nomor: qNum,
+          Jenis_Soal: 'PG',
+          Nilai: 10,
+          Nama_Materi: '',
+          Judul_Referensi: '',
+          Isi_Referensi: '',
+          Soal: soalText || `Soal nomor ${qNum}`,
+          File_Audio_Video: '',
+          Pilihan_A: options['A'] || '',
+          Pilihan_B: options['B'] || '',
+          Pilihan_C: options['C'] || '',
+          Pilihan_D: options['D'] || '',
+          Pilihan_E: options['E'] || '',
+          Pilihan_F: options['F'] || '',
+          Kunci_Jawaban_Non_Essay: kunci || 'A',
+          Jawaban_Essay: essay
+        }, results.length));
+      }
+    }
+  }
+  return results;
+}
+
 function sanitizeJsonString(str: string): string {
+  if (!str || typeof str !== 'string') return '';
   let s = str;
+  // 1. Remove thinking / reasoning tags (DeepSeek R1, Qwen, etc.)
   s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
   s = s.replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '');
-  s = s.replace(/```(?:json)?\s*([\s\S]*?)\s*```/gi, '$1');
 
-  // Fix LaTeX backslashes that break JSON
+  // 2. Strip markdown fences
+  s = s.replace(/```(?:json)?\s*([\s\S]*?)\s*```/gi, '$1');
+  s = s.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
+
+  // 3. Convert Python boolean/null literals to JSON
+  s = s.replace(/:\s*True\b/g, ': true');
+  s = s.replace(/:\s*False\b/g, ': false');
+  s = s.replace(/:\s*None\b/g, ': null');
+
+  // 4. Normalize smart quotes
+  s = s.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+
+  // 5. Fix LaTeX backslashes that break standard JSON parsing
   s = s.replace(/\\(frac|times|text|theta|tau|tan|triangle|begin|beta|bar|bullet|binom|right|rho|rad|root|forall|approx|alpha|le|ge|neq|pm|cdot|circ|degree|sqrt|partial|sum|int|infty|lim|sin|cos|log|ln|vec|hat|over|under)/gi, '\\\\$1');
   s = s.replace(/\\([a-zA-Z])/g, (m, letter) => {
     if (['b', 'f', 'n', 'r', 't', 'u'].includes(letter)) return m;
     return '\\\\' + letter;
   });
 
-  // Fix unescaped newlines/tabs inside string literals
+  // 6. Fix unquoted keys e.g. { Nomor: 1, Soal: "..." }
+  s = s.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
+
+  // 7. Fix unescaped newlines/tabs inside string literals
   let inStr = false;
   let isEsc = false;
   let fixed = '';
@@ -292,7 +386,7 @@ function parseQuestionsJson(rawText: string) {
       return val.map((item, idx) => normalizeQuestionObject(item, idx));
     }
     if (typeof val === 'object') {
-      const potentialKeys = ['questions', 'soal', 'data', 'items', 'daftar_soal', 'bank_soal', 'result', 'results'];
+      const potentialKeys = ['questions', 'soal', 'data', 'items', 'daftar_soal', 'bank_soal', 'result', 'results', 'output'];
       for (const k of potentialKeys) {
         if (Array.isArray(val[k]) && val[k].length > 0) {
           return val[k].map((item: any, idx: number) => normalizeQuestionObject(item, idx));
@@ -313,6 +407,7 @@ function parseQuestionsJson(rawText: string) {
     return null;
   };
 
+  // Strategy 1: Direct JSON parsing
   for (const cand of candidatesToTry) {
     try {
       const parsed = JSON.parse(cand);
@@ -321,6 +416,7 @@ function parseQuestionsJson(rawText: string) {
     } catch {}
   }
 
+  // Strategy 2: Array substring [ ... ]
   for (const cand of candidatesToTry) {
     const startIdx = cand.indexOf('[');
     const endIdx = cand.lastIndexOf(']');
@@ -341,6 +437,7 @@ function parseQuestionsJson(rawText: string) {
     }
   }
 
+  // Strategy 3: Object substring { ... }
   for (const cand of candidatesToTry) {
     const objStart = cand.indexOf('{');
     const objEnd = cand.lastIndexOf('}');
@@ -361,7 +458,7 @@ function parseQuestionsJson(rawText: string) {
     }
   }
 
-  // Truncated array heal
+  // Strategy 4: Truncated array heal
   for (const cand of candidatesToTry) {
     const startIdx = cand.indexOf('[');
     if (startIdx !== -1) {
@@ -378,31 +475,69 @@ function parseQuestionsJson(rawText: string) {
     }
   }
 
-  // Regex block extraction
+  // Strategy 5: Depth-aware brace matcher for individual objects (Handles LaTeX braces {} safely!)
   try {
-    const objectRegex = /\{[^{}]*"(?:Soal|soal|question|pertanyaan)"[^{}]*\}/g;
-    const matchedBlocks = cleanBase.match(objectRegex);
-    if (matchedBlocks && matchedBlocks.length > 0) {
-      const questions: any[] = [];
-      for (let i = 0; i < matchedBlocks.length; i++) {
-        try {
-          const cleanedBlock = sanitizeJsonString(matchedBlocks[i]);
-          const parsed = JSON.parse(cleanedBlock);
-          questions.push(normalizeQuestionObject(parsed, i));
-        } catch {}
+    const individualObjects: any[] = [];
+    let inString = false;
+    let isEsc = false;
+    let depth = 0;
+    let startPos = -1;
+
+    for (let i = 0; i < cleanBase.length; i++) {
+      const ch = cleanBase[i];
+      if (isEsc) {
+        isEsc = false;
+        continue;
       }
-      if (questions.length > 0) return questions;
+      if (ch === '\\') {
+        isEsc = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (ch === '{') {
+          if (depth === 0) startPos = i;
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+          if (depth === 0 && startPos !== -1) {
+            const block = cleanBase.substring(startPos, i + 1);
+            try {
+              const parsed = JSON.parse(sanitizeJsonString(block));
+              if (parsed && typeof parsed === 'object' && (parsed.Soal || parsed.soal || parsed.question || parsed.pertanyaan || parsed.Pilihan_A || parsed.A)) {
+                individualObjects.push(normalizeQuestionObject(parsed, individualObjects.length));
+              }
+            } catch {}
+            startPos = -1;
+          }
+        }
+      }
+    }
+    if (individualObjects.length > 0) {
+      return individualObjects;
     }
   } catch {}
 
-  throw new Error('Respons model tidak mengandung format JSON array soal yang valid.');
+  // Strategy 6: Plain-text / Markdown Question Extractor (when model responds in natural text)
+  const plainTextQuestions = parseFromPlainText(cleanBase);
+  if (plainTextQuestions.length > 0) {
+    return plainTextQuestions;
+  }
+
+  throw new Error('Respons model tidak mengandung format soal yang dapat dibaca. Silakan coba generate kembali.');
 }
 
 function getDefaultBaseUrl(provider: string, customBaseUrl?: string): string {
   if (provider === 'custom') {
     return customBaseUrl?.trim() || 'http://localhost:11434/v1';
   }
-  if (customBaseUrl && customBaseUrl.trim() && !customBaseUrl.includes('localhost:11434')) {
+  if (provider === '9router') {
+    return customBaseUrl?.trim() || 'http://localhost:20128/v1';
+  }
+  if (customBaseUrl && customBaseUrl.trim() && !customBaseUrl.includes('localhost:11434') && !customBaseUrl.includes('localhost:20128')) {
     return customBaseUrl.trim();
   }
   switch (provider) {
@@ -475,6 +610,7 @@ function resolveModel(provider: string, customModel?: string): string {
     case 'deepseek': return 'deepseek-chat';
     case 'openai': return 'gpt-4o-mini';
     case 'openrouter': return 'meta-llama/llama-3.3-70b-instruct';
+    case '9router': return 'gemini-2.5-flash';
     case 'custom': return 'llama3.2';
     default: return 'gemini-2.5-flash';
   }
@@ -494,7 +630,7 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
 
     const provider = body.aiProvider || 'gemini';
     const apiKey = (body.customApiKey || (provider === 'gemini' ? (context.env.GEMINI_API_KEY || context.env.VITE_GEMINI_API_KEY || "") : "")).trim();
-    if (!apiKey && provider !== 'custom') {
+    if (!apiKey && provider !== 'custom' && provider !== '9router') {
       return new Response(
         JSON.stringify({
           error: `API Key untuk ${provider.toUpperCase()} belum diisi. Silakan masukkan API Key Anda pada Pengaturan AI.`,
@@ -529,6 +665,7 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
             groq: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'gemma2-9b-it', 'mixtral-8x7b-32768'],
             openai: ['gpt-4o-mini', 'gpt-4o'],
             deepseek: ['deepseek-chat'],
+            '9router': ['gemini-2.5-flash', 'gemini-2.0-flash', 'gpt-4o-mini', 'deepseek-chat', 'claude-3-5-sonnet'],
             openrouter: ['google/gemini-2.0-flash-001', 'meta-llama/llama-3.3-70b-instruct:free', 'qwen/qwen-2.5-72b-instruct:free', 'mistralai/mistral-7b-instruct:free']
           };
 

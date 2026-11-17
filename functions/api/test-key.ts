@@ -36,7 +36,10 @@ function getDefaultBaseUrl(provider: string, customBaseUrl?: string): string {
   if (provider === 'custom') {
     return customBaseUrl?.trim() || 'http://localhost:11434/v1';
   }
-  if (customBaseUrl && customBaseUrl.trim() && !customBaseUrl.includes('localhost:11434')) {
+  if (provider === '9router') {
+    return customBaseUrl?.trim() || 'http://localhost:20128/v1';
+  }
+  if (customBaseUrl && customBaseUrl.trim() && !customBaseUrl.includes('localhost:11434') && !customBaseUrl.includes('localhost:20128')) {
     return customBaseUrl.trim();
   }
   switch (provider) {
@@ -61,11 +64,11 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
     const rawModel = (body.customModel || "").trim().replace(/^models\//, "");
     let model = rawModel;
     if (!model || model === 'auto' || (provider === 'groq' && model === 'llama-3.3-70b-versatile')) {
-      model = provider === 'gemini' ? 'gemini-2.5-flash' : provider === 'groq' ? 'llama-3.1-8b-instant' : provider === 'deepseek' ? 'deepseek-chat' : provider === 'openai' ? 'gpt-4o-mini' : provider === 'openrouter' ? 'meta-llama/llama-3.3-70b-instruct' : 'llama3.2';
+      model = provider === 'gemini' ? 'gemini-2.5-flash' : provider === 'groq' ? 'llama-3.1-8b-instant' : provider === 'deepseek' ? 'deepseek-chat' : provider === 'openai' ? 'gpt-4o-mini' : provider === 'openrouter' ? 'meta-llama/llama-3.3-70b-instruct' : provider === '9router' ? 'gemini-2.5-flash' : 'llama3.2';
     }
     const customBaseUrl = body.customBaseUrl;
 
-    if (!apiKey && provider !== 'custom') {
+    if (!apiKey && provider !== 'custom' && provider !== '9router') {
       return new Response(
         JSON.stringify({ ok: false, message: `API Key untuk ${provider.toUpperCase()} kosong. Masukkan API Key Anda di Pengaturan AI.` }),
         { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }

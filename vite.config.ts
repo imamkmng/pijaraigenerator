@@ -3,48 +3,378 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig, loadEnv, Plugin } from 'vite';
 
-function parseQuestionsJson(rawText: string): any[] {
-  let cleaned = rawText.trim();
-  if (cleaned.startsWith('```json')) cleaned = cleaned.substring(7);
-  else if (cleaned.startsWith('```')) cleaned = cleaned.substring(3);
-  if (cleaned.endsWith('```')) cleaned = cleaned.substring(0, cleaned.length - 3);
-  cleaned = cleaned.trim();
+function normalizeQuestionObject(raw: any, index: number) {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      Nomor: index + 1,
+      Jenis_Soal: 'PG',
+      Nilai: 10,
+      Nama_Materi: '',
+      Judul_Referensi: '',
+      Isi_Referensi: '',
+      Soal: String(raw || ''),
+      File_Audio_Video: '',
+      Pilihan_A: '',
+      Pilihan_B: '',
+      Pilihan_C: '',
+      Pilihan_D: '',
+      Kunci_Jawaban_Non_Essay: '',
+      Jawaban_Essay: ''
+    };
+  }
 
+  const soal = raw.Soal || raw.soal || raw.question || raw.pertanyaan || raw.text || raw.Teks || '';
+  const nomor = Number(raw.Nomor || raw.nomor || raw.no || raw.No || index + 1) || (index + 1);
+
+  let jenis = 'PG';
+  const rawJenis = String(raw.Jenis_Soal || raw.jenis_soal || raw.jenisSoal || raw.type || raw.Type || '').toUpperCase().trim();
+  if (['PG', 'ESSAY', 'PILIHAN ESSAY', 'PGK', 'MENGURUTKAN'].includes(rawJenis)) {
+    jenis = rawJenis;
+  } else if (rawJenis.includes('KOMPLEKS') || rawJenis.includes('PGK')) {
+    jenis = 'PGK';
+  } else if (rawJenis.includes('PILIHAN') && rawJenis.includes('ESSAY')) {
+    jenis = 'PILIHAN ESSAY';
+  } else if (rawJenis.includes('ESSAY') || rawJenis.includes('ESAI')) {
+    jenis = 'ESSAY';
+  } else if (rawJenis.includes('URUT') || rawJenis.includes('MENGURUTKAN')) {
+    jenis = 'MENGURUTKAN';
+  }
+
+  let optA = raw.Pilihan_A ?? raw.pilihan_a ?? raw.pilihanA ?? raw.opsi_a ?? raw.opsiA ?? raw.A ?? raw.a ?? '';
+  let optB = raw.Pilihan_B ?? raw.pilihan_b ?? raw.pilihanB ?? raw.opsi_b ?? raw.opsiB ?? raw.B ?? raw.b ?? '';
+  let optC = raw.Pilihan_C ?? raw.pilihan_c ?? raw.pilihanC ?? raw.opsi_c ?? raw.opsiC ?? raw.C ?? raw.c ?? '';
+  let optD = raw.Pilihan_D ?? raw.pilihan_d ?? raw.pilihanD ?? raw.opsi_d ?? raw.opsiD ?? raw.D ?? raw.d ?? '';
+  let optE = raw.Pilihan_E ?? raw.pilihan_e ?? raw.pilihanE ?? raw.opsi_e ?? raw.opsiE ?? raw.E ?? raw.e ?? '';
+  let optF = raw.Pilihan_F ?? raw.pilihan_f ?? raw.pilihanF ?? raw.opsi_f ?? raw.opsiF ?? raw.F ?? raw.f ?? '';
+
+  const optionsArr = Array.isArray(raw.options) ? raw.options : (Array.isArray(raw.pilihan) ? raw.pilihan : null);
+  if (optionsArr && optionsArr.length > 0) {
+    const getOptText = (item: any) => typeof item === 'string' ? item : (item?.text || item?.label || item?.value || '');
+    if (!optA && optionsArr[0] !== undefined) optA = getOptText(optionsArr[0]);
+    if (!optB && optionsArr[1] !== undefined) optB = getOptText(optionsArr[1]);
+    if (!optC && optionsArr[2] !== undefined) optC = getOptText(optionsArr[2]);
+    if (!optD && optionsArr[3] !== undefined) optD = getOptText(optionsArr[3]);
+    if (!optE && optionsArr[4] !== undefined) optE = getOptText(optionsArr[4]);
+    if (!optF && optionsArr[5] !== undefined) optF = getOptText(optionsArr[5]);
+  }
+
+  let kunci = raw.Kunci_Jawaban_Non_Essay ?? raw.kunci_jawaban_non_essay ?? raw.kunci_jawaban ?? raw.kunciJawaban ?? raw.kunci ?? raw.jawaban_benar ?? raw.answer ?? raw.correct ?? '';
+  if (Array.isArray(kunci)) {
+    kunci = kunci.join(',');
+  }
+
+  const essay = raw.Jawaban_Essay ?? raw.jawaban_essay ?? raw.jawabanEssay ?? raw.pedoman_essay ?? raw.kunci_essay ?? raw.rubrik ?? '';
+
+  return {
+    Nomor: nomor,
+    Jenis_Soal: jenis,
+    Nilai: Number(raw.Nilai || raw.nilai || 10) || 10,
+    Nama_Materi: String(raw.Nama_Materi || raw.nama_materi || raw.materi || raw.topik || ''),
+    Judul_Referensi: String(raw.Judul_Referensi || raw.judul_referensi || raw.judul || ''),
+    Isi_Referensi: String(raw.Isi_Referensi || raw.isi_referensi || raw.stimulus || raw.bacaan || ''),
+    Soal: String(soal),
+    File_Audio_Video: '',
+    Pilihan_A: optA !== '' ? String(optA) : undefined,
+    Pilihan_B: optB !== '' ? String(optB) : undefined,
+    Pilihan_C: optC !== '' ? String(optC) : undefined,
+    Pilihan_D: optD !== '' ? String(optD) : undefined,
+    Pilihan_E: optE !== '' ? String(optE) : undefined,
+    Pilihan_F: optF !== '' ? String(optF) : undefined,
+    Kunci_Jawaban_Non_Essay: String(kunci).trim().toUpperCase(),
+    Jawaban_Essay: String(essay)
+  };
+}
+
+function parseFromPlainText(text: string): any[] {
+  if (!text || typeof text !== 'string') return [];
+
+  const cleaned = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+    .replace(/```(?:json)?/gi, '')
+    .trim();
+
+  const questionBlocks = cleaned.split(/(?:^|\n)\s*(?:\*\*)?(?:Soal\s*)?(\d+)[\.\:\)]\s*(?:\*\*)?/i);
+
+  const results: any[] = [];
+  if (questionBlocks.length > 2) {
+    for (let i = 1; i < questionBlocks.length; i += 2) {
+      const qNum = parseInt(questionBlocks[i]) || Math.floor(i / 2) + 1;
+      const blockContent = questionBlocks[i + 1] || '';
+
+      let soalText = blockContent;
+      const options: Record<string, string> = {};
+
+      const optRegex = /(?:^|\n)\s*(?:\*\*)?([A-F])[\.\:\)]\s*(?:\*\*)?([^\n]+)/gi;
+      let optMatch;
+      let firstOptIdx = -1;
+      while ((optMatch = optRegex.exec(blockContent)) !== null) {
+        if (firstOptIdx === -1) firstOptIdx = optMatch.index;
+        const letter = optMatch[1].toUpperCase();
+        options[letter] = optMatch[2].trim();
+      }
+
+      if (firstOptIdx !== -1) {
+        soalText = blockContent.substring(0, firstOptIdx).trim();
+      }
+
+      let kunci = '';
+      const keyMatch = blockContent.match(/(?:Kunci(?:[\s_]*Jawaban)?|Jawaban(?:[\s_]*Benar)?|Key|Answer)\s*[:=]\s*([A-Fa-f,\s]+)/i);
+      if (keyMatch) {
+        kunci = keyMatch[1].replace(/[^A-Fa-f,]/g, '').toUpperCase().trim();
+      }
+
+      let essay = '';
+      const essayMatch = blockContent.match(/(?:Jawaban(?:[\s_]*Essay)?|Pedoman(?:[\s_]*Essay)?|Pembahasan|Penjelasan)\s*[:=]\s*([^\n]+)/i);
+      if (essayMatch) {
+        essay = essayMatch[1].trim();
+      }
+
+      soalText = soalText.replace(/^(?:Soal|Pertanyaan)\s*[:\-]\s*/i, '').trim();
+
+      if (soalText || Object.keys(options).length > 0) {
+        results.push(normalizeQuestionObject({
+          Nomor: qNum,
+          Jenis_Soal: 'PG',
+          Nilai: 10,
+          Nama_Materi: '',
+          Judul_Referensi: '',
+          Isi_Referensi: '',
+          Soal: soalText || `Soal nomor ${qNum}`,
+          File_Audio_Video: '',
+          Pilihan_A: options['A'] || '',
+          Pilihan_B: options['B'] || '',
+          Pilihan_C: options['C'] || '',
+          Pilihan_D: options['D'] || '',
+          Pilihan_E: options['E'] || '',
+          Pilihan_F: options['F'] || '',
+          Kunci_Jawaban_Non_Essay: kunci || 'A',
+          Jawaban_Essay: essay
+        }, results.length));
+      }
+    }
+  }
+  return results;
+}
+
+function sanitizeJsonString(str: string): string {
+  if (!str || typeof str !== 'string') return '';
+  let s = str;
+  s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  s = s.replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '');
+  s = s.replace(/```(?:json)?\s*([\s\S]*?)\s*```/gi, '$1');
+  s = s.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
+  s = s.replace(/:\s*True\b/g, ': true');
+  s = s.replace(/:\s*False\b/g, ': false');
+  s = s.replace(/:\s*None\b/g, ': null');
+  s = s.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+  s = s.replace(/\\(frac|times|text|theta|tau|tan|triangle|begin|beta|bar|bullet|binom|right|rho|rad|root|forall|approx|alpha|le|ge|neq|pm|cdot|circ|degree|sqrt|partial|sum|int|infty|lim|sin|cos|log|ln|vec|hat|over|under)/gi, '\\\\$1');
+  s = s.replace(/\\([a-zA-Z])/g, (m, letter) => {
+    if (['b', 'f', 'n', 'r', 't', 'u'].includes(letter)) return m;
+    return '\\\\' + letter;
+  });
+  s = s.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
+
+  let inStr = false;
+  let isEsc = false;
+  let fixed = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (isEsc) {
+      fixed += ch;
+      isEsc = false;
+      continue;
+    }
+    if (ch === '\\') {
+      fixed += ch;
+      isEsc = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      fixed += ch;
+      continue;
+    }
+    if (inStr) {
+      if (ch === '\n') {
+        fixed += '\\n';
+        continue;
+      }
+      if (ch === '\r') {
+        fixed += '\\r';
+        continue;
+      }
+      if (ch === '\t') {
+        fixed += '\\t';
+        continue;
+      }
+    }
+    fixed += ch;
+  }
+  s = fixed;
+  s = s.replace(/,\s*([\]}])/g, '$1');
+
+  return s.trim();
+}
+
+function parseQuestionsJson(rawText: string): any[] {
+  if (!rawText || typeof rawText !== 'string') return [];
+
+  const cleanBase = rawText
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+    .trim();
+
+  const candidatesToTry = [cleanBase, sanitizeJsonString(cleanBase)];
+
+  const extractArray = (val: any) => {
+    if (!val) return null;
+    if (Array.isArray(val) && val.length > 0) {
+      return val.map((item, idx) => normalizeQuestionObject(item, idx));
+    }
+    if (typeof val === 'object') {
+      const potentialKeys = ['questions', 'soal', 'data', 'items', 'daftar_soal', 'bank_soal', 'result', 'results', 'output'];
+      for (const k of potentialKeys) {
+        if (Array.isArray(val[k]) && val[k].length > 0) {
+          return val[k].map((item: any, idx: number) => normalizeQuestionObject(item, idx));
+        }
+      }
+      const firstArray = Object.values(val).find(v => Array.isArray(v) && v.length > 0);
+      if (firstArray && Array.isArray(firstArray)) {
+        return firstArray.map((item: any, idx: number) => normalizeQuestionObject(item, idx));
+      }
+      if (val.Soal || val.soal || val.question || val.pertanyaan) {
+        return [normalizeQuestionObject(val, 0)];
+      }
+      const values = Object.values(val);
+      if (values.length > 0 && values.every(v => v && typeof v === 'object' && ((v as any).Soal || (v as any).soal || (v as any).question))) {
+        return values.map((item: any, idx: number) => normalizeQuestionObject(item, idx));
+      }
+    }
+    return null;
+  };
+
+  // Strategy 1: Direct JSON parsing
+  for (const cand of candidatesToTry) {
+    try {
+      const parsed = JSON.parse(cand);
+      const res = extractArray(parsed);
+      if (res && res.length > 0) return res;
+    } catch {}
+  }
+
+  // Strategy 2: Array substring [ ... ]
+  for (const cand of candidatesToTry) {
+    const startIdx = cand.indexOf('[');
+    const endIdx = cand.lastIndexOf(']');
+    if (startIdx !== -1 && endIdx > startIdx) {
+      const sub = cand.substring(startIdx, endIdx + 1);
+      try {
+        const parsed = JSON.parse(sub);
+        const res = extractArray(parsed);
+        if (res && res.length > 0) return res;
+      } catch {
+        try {
+          const repaired = sanitizeJsonString(sub);
+          const parsed = JSON.parse(repaired);
+          const res = extractArray(parsed);
+          if (res && res.length > 0) return res;
+        } catch {}
+      }
+    }
+  }
+
+  // Strategy 3: Object substring { ... }
+  for (const cand of candidatesToTry) {
+    const objStart = cand.indexOf('{');
+    const objEnd = cand.lastIndexOf('}');
+    if (objStart !== -1 && objEnd > objStart) {
+      const sub = cand.substring(objStart, objEnd + 1);
+      try {
+        const parsed = JSON.parse(sub);
+        const res = extractArray(parsed);
+        if (res && res.length > 0) return res;
+      } catch {
+        try {
+          const repaired = sanitizeJsonString(sub);
+          const parsed = JSON.parse(repaired);
+          const res = extractArray(parsed);
+          if (res && res.length > 0) return res;
+        } catch {}
+      }
+    }
+  }
+
+  // Strategy 4: Truncated array heal
+  for (const cand of candidatesToTry) {
+    const startIdx = cand.indexOf('[');
+    if (startIdx !== -1) {
+      const lastBrace = cand.lastIndexOf('}');
+      if (lastBrace > startIdx) {
+        const healed = cand.substring(startIdx, lastBrace + 1) + ']';
+        const sanitizedHealed = sanitizeJsonString(healed);
+        try {
+          const parsed = JSON.parse(sanitizedHealed);
+          const res = extractArray(parsed);
+          if (res && res.length > 0) return res;
+        } catch {}
+      }
+    }
+  }
+
+  // Strategy 5: Depth-aware brace matcher
   try {
-    const direct = JSON.parse(cleaned);
-    if (Array.isArray(direct)) return direct;
-    if (direct && typeof direct === 'object') {
-      if (Array.isArray(direct.questions)) return direct.questions;
-      if (Array.isArray(direct.soal)) return direct.soal;
-      if (Array.isArray(direct.data)) return direct.data;
-      const firstArr = Object.values(direct).find(v => Array.isArray(v));
-      if (firstArr) return firstArr as any[];
+    const individualObjects: any[] = [];
+    let inString = false;
+    let isEsc = false;
+    let depth = 0;
+    let startPos = -1;
+
+    for (let i = 0; i < cleanBase.length; i++) {
+      const ch = cleanBase[i];
+      if (isEsc) {
+        isEsc = false;
+        continue;
+      }
+      if (ch === '\\') {
+        isEsc = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (ch === '{') {
+          if (depth === 0) startPos = i;
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+          if (depth === 0 && startPos !== -1) {
+            const block = cleanBase.substring(startPos, i + 1);
+            try {
+              const parsed = JSON.parse(sanitizeJsonString(block));
+              if (parsed && typeof parsed === 'object' && (parsed.Soal || parsed.soal || parsed.question || parsed.pertanyaan || parsed.Pilihan_A || parsed.A)) {
+                individualObjects.push(normalizeQuestionObject(parsed, individualObjects.length));
+              }
+            } catch {}
+            startPos = -1;
+          }
+        }
+      }
+    }
+    if (individualObjects.length > 0) {
+      return individualObjects;
     }
   } catch {}
 
-  const sIdx = cleaned.indexOf('[');
-  const eIdx = cleaned.lastIndexOf(']');
-  if (sIdx !== -1 && eIdx !== -1 && eIdx >= sIdx) {
-    try {
-      const parsed = JSON.parse(cleaned.substring(sIdx, eIdx + 1));
-      if (Array.isArray(parsed)) return parsed;
-    } catch {}
+  // Strategy 6: Plain-text / Markdown Question Extractor
+  const plainTextQuestions = parseFromPlainText(cleanBase);
+  if (plainTextQuestions.length > 0) {
+    return plainTextQuestions;
   }
 
-  const objStart = cleaned.indexOf('{');
-  const objEnd = cleaned.lastIndexOf('}');
-  if (objStart !== -1 && objEnd !== -1 && objEnd >= objStart) {
-    try {
-      const parsedObj = JSON.parse(cleaned.substring(objStart, objEnd + 1));
-      if (Array.isArray(parsedObj.questions)) return parsedObj.questions;
-      if (Array.isArray(parsedObj.soal)) return parsedObj.soal;
-      if (Array.isArray(parsedObj.data)) return parsedObj.data;
-      const firstArr = Object.values(parsedObj).find(v => Array.isArray(v));
-      if (firstArr) return firstArr as any[];
-    } catch {}
-  }
-
-  throw new Error('Respons model tidak mengandung JSON array soal yang valid.');
+  throw new Error('Respons model tidak mengandung format soal yang dapat dibaca. Silakan coba generate kembali.');
 }
 
 function resolveDevModel(provider: string, customModel?: string): string {
@@ -60,6 +390,7 @@ function resolveDevModel(provider: string, customModel?: string): string {
     case 'deepseek': return 'deepseek-chat';
     case 'openai': return 'gpt-4o-mini';
     case 'openrouter': return 'meta-llama/llama-3.3-70b-instruct';
+    case '9router': return 'gemini-2.5-flash';
     case 'custom': return 'llama3.2';
     default: return 'gemini-2.5-flash';
   }
@@ -69,7 +400,10 @@ function getDevBaseUrl(provider: string, customBaseUrl?: string): string {
   if (provider === 'custom') {
     return customBaseUrl?.trim() || 'http://localhost:11434/v1';
   }
-  if (customBaseUrl && customBaseUrl.trim() && !customBaseUrl.includes('localhost:11434')) {
+  if (provider === '9router') {
+    return customBaseUrl?.trim() || 'http://localhost:20128/v1';
+  }
+  if (customBaseUrl && customBaseUrl.trim() && !customBaseUrl.includes('localhost:11434') && !customBaseUrl.includes('localhost:20128')) {
     return customBaseUrl.trim();
   }
   switch (provider) {
@@ -151,7 +485,7 @@ function devApiPlugin(env: Record<string, string>): Plugin {
               let model = resolveDevModel(provider, body.customModel);
               const customBaseUrl = body.customBaseUrl;
 
-              if (!apiKey && provider !== 'custom') {
+              if (!apiKey && provider !== 'custom' && provider !== '9router') {
                 res.statusCode = 200;
                 res.setHeader('Content-Type', 'application/json');
                 res.end(JSON.stringify({ ok: false, message: `API Key untuk ${provider.toUpperCase()} belum diisi.` }));
@@ -292,7 +626,7 @@ function devApiPlugin(env: Record<string, string>): Plugin {
               const provider = body.aiProvider || 'gemini';
               const apiKey = (body.customApiKey || (provider === 'gemini' ? (env.GEMINI_API_KEY || process.env.GEMINI_API_KEY || '') : '')).trim();
 
-              if (!apiKey && provider !== 'custom') {
+              if (!apiKey && provider !== 'custom' && provider !== '9router') {
                 res.statusCode = 400;
                 res.setHeader('Content-Type', 'application/json');
                 res.end(JSON.stringify({
