@@ -1038,7 +1038,7 @@ export default function App() {
       }
     }
     setTestStatus(null);
-    if (storedKey || newProv === 'custom') {
+    if (storedKey || newProv === 'custom' || newProv === '9router') {
       handleFetchAccountModels(newProv, storedKey, true);
     }
   };
@@ -1071,14 +1071,37 @@ export default function App() {
     const targetProv = prov || aiProvider;
     const provConfig = AI_PROVIDERS.find(p => p.id === targetProv) || activeProviderConfig;
     const key = (overrideKey !== undefined ? overrideKey : customApiKey).trim();
-    if (!key && !hasServerKey && targetProv !== 'custom') {
+
+    if (!key && !hasServerKey && targetProv !== 'custom' && targetProv !== '9router') {
       if (!silent) {
         setAutoDetectedBanner(`Masukkan API Key ${provConfig.name} terlebih dahulu untuk memuat model.`);
         setTimeout(() => setAutoDetectedBanner(''), 4000);
       }
       return;
     }
+
     setIsLoadingModels(true);
+
+    const applyLoadedModels = (models: { id: string; name: string }[], source = 'server') => {
+      setAccountModels(prev => {
+        const next = { ...prev, [targetProv]: models };
+        try { localStorage.setItem('accountModels', JSON.stringify(next)); } catch { }
+        return next;
+      });
+      if (customModel !== 'auto' && !isCustomModelName) {
+        const exists = models.some((m: any) => m.id === customModel);
+        if (!exists) {
+          setCustomModel('auto');
+        }
+      }
+      if (!silent) {
+        const sourceLabel = source === 'direct' ? ' (koneksi langsung)' : source === 'builtin' ? ' (model rekomendasi)' : '';
+        setAutoDetectedBanner(`Berhasil memuat ${models.length} model aktif dari ${provConfig.name}${sourceLabel}!`);
+        setTimeout(() => setAutoDetectedBanner(''), 5000);
+      }
+    };
+
+    // 1. Coba panggil backend API endpoint /api/models terlebih dahulu
     try {
       const res = await fetch('/api/models', {
         method: 'POST',
@@ -1086,46 +1109,98 @@ export default function App() {
         body: JSON.stringify({
           aiProvider: targetProv,
           customApiKey: key,
-          customBaseUrl: (targetProv === 'custom' || showAdvancedBaseUrl) ? customBaseUrl.trim() : ''
+          customBaseUrl: (targetProv === 'custom' || targetProv === '9router' || showAdvancedBaseUrl) ? customBaseUrl.trim() : ''
         })
       });
-      const data = await res.json().catch(() => ({}));
-      if (data && data.ok && Array.isArray(data.models) && data.models.length > 0) {
-        setAccountModels(prev => {
-          const next = { ...prev, [targetProv]: data.models };
-          try { localStorage.setItem('accountModels', JSON.stringify(next)); } catch { }
-          return next;
-        });
-        if (customModel !== 'auto' && !isCustomModelName) {
-          const exists = data.models.some((m: any) => m.id === customModel);
-          if (!exists) {
-            setCustomModel('auto');
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok && Array.isArray(data.models) && data.models.length > 0) {
+          applyLoadedModels(data.models, 'server');
+          setIsLoadingModels(false);
+          return;
+        }
+      }
+    } catch {
+      // Backend /api/models tidak dapat dijangkau (misal static deployment GitHub Pages atau server dev offline)
+      // Lanjut otomatis ke pencarian langsung (client-side direct fetch)
+    }
+
+    // 2. Pencarian langsung dari sisi klien (Direct Client-Side Fetch ke API Provider)
+    try {
+      let directModels: { id: string; name: string }[] = [];
+
+      if (targetProv === 'gemini') {
+        if (key) {
+          const gRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
+          if (gRes.ok) {
+            const gData: any = await gRes.json();
+            directModels = (gData.models || [])
+              .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
+              .map((m: any) => {
+                const id = m.name.replace(/^models\//, '');
+                return { id, name: m.displayName || id };
+              });
           }
         }
-        if (!silent) {
-          setAutoDetectedBanner(`Berhasil memuat ${data.models.length} model aktif dari akun ${provConfig.name}!`);
-          setTimeout(() => setAutoDetectedBanner(''), 5000);
-        }
       } else {
-        if (!silent) {
-          setAutoDetectedBanner(data?.error || `Gagal memuat model dari ${provConfig.name}.`);
-          setTimeout(() => setAutoDetectedBanner(''), 5000);
+        const effectiveBase = (customBaseUrl.trim() || provConfig.defaultBaseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (key) headers['Authorization'] = `Bearer ${key}`;
+        if (targetProv === 'openrouter') {
+          headers['HTTP-Referer'] = window.location.origin || 'https://cbtpijar.app';
+          headers['X-Title'] = 'CBT Pijar AI Generator';
+        }
+        const oRes = await fetch(`${effectiveBase}/models`, { headers });
+        if (oRes.ok) {
+          const oData: any = await oRes.json();
+          const rawList = Array.isArray(oData.data) ? oData.data : (Array.isArray(oData.models) ? oData.models : []);
+          directModels = rawList
+            .map((m: any) => (typeof m === 'string' ? { id: m, name: m } : { id: m.id, name: m.id }))
+            .filter((m: any) => {
+              if (!m.id) return false;
+              const low = m.id.toLowerCase();
+              return !(
+                low.includes('whisper') ||
+                low.includes('embed') ||
+                low.includes('safeguard') ||
+                low.includes('prompt-guard') ||
+                low.includes('moderation') ||
+                low.includes('dall-e') ||
+                low.includes('tts')
+              );
+            });
         }
       }
-    } catch (err: any) {
+
+      if (directModels.length > 0) {
+        applyLoadedModels(directModels, 'direct');
+        setIsLoadingModels(false);
+        return;
+      }
+    } catch {
+      // Jika fetch langsung juga mengalami batasan CORS pada beberapa browser/proxy
+    }
+
+    // 3. Fallback anggun: Gunakan daftar model bawaan yang terverifikasi agar pengguna tetap lancar
+    if (provConfig.models && provConfig.models.length > 0) {
+      applyLoadedModels(provConfig.models, 'builtin');
       if (!silent) {
-        setAutoDetectedBanner(`Gagal menghubungi server untuk memuat model: ${err.message}`);
+        setAutoDetectedBanner(`Menggunakan daftar model rekomendasi bawaan untuk ${provConfig.name}.`);
         setTimeout(() => setAutoDetectedBanner(''), 5000);
       }
-    } finally {
-      setIsLoadingModels(false);
+    } else {
+      if (!silent) {
+        setAutoDetectedBanner(`Gagal memuat model dari ${provConfig.name}. Periksa koneksi internet atau API Key.`);
+        setTimeout(() => setAutoDetectedBanner(''), 5000);
+      }
     }
+    setIsLoadingModels(false);
   };
 
   // Auto-fetch active models whenever settings modal is shown or key/provider changes
   useEffect(() => {
     const key = customApiKey.trim();
-    if ((key || hasServerKey || aiProvider === 'custom') && (!accountModels[aiProvider] || accountModels[aiProvider].length === 0)) {
+    if ((key || hasServerKey || aiProvider === 'custom' || aiProvider === '9router') && (!accountModels[aiProvider] || accountModels[aiProvider].length === 0)) {
       handleFetchAccountModels(aiProvider, key, true);
     }
   }, [aiProvider, customApiKey, showSettings, hasServerKey]);
@@ -1148,7 +1223,7 @@ export default function App() {
         })
       }).catch(() => null);
 
-      if (res && res.status !== 404) {
+      if (res && res.ok) {
         const result = await res.json().catch(() => ({}));
         if (result && typeof result.ok !== 'undefined') {
           if (result.fallbackModel) {
