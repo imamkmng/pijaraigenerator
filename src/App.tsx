@@ -1545,6 +1545,174 @@ export default function App() {
     };
   };
 
+  // Helper to extract individual question fields even if JSON.parse fails on malformed quotes
+  const extractFieldsFromObjectBlock = (block: string, index: number): QuestionData | null => {
+    if (!block || typeof block !== 'string') return null;
+
+    const getField = (fieldPattern: string): string => {
+      const regex = new RegExp(`(?:"|')?(?:${fieldPattern})(?:"|')?\\s*:\\s*(?:"|')([\\s\\S]*?)(?=(?:"|')\\s*,\\s*(?:"|')?[a-zA-Z_]+(?:"|')?\\s*:|(?:"|')\\s*\\}|$|$)`, 'i');
+      const m = block.match(regex);
+      if (m) {
+        return m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').trim();
+      }
+      const numRegex = new RegExp(`(?:"|')?(?:${fieldPattern})(?:"|')?\\s*:\\s*([0-9A-Za-z_\\-\\.]+)`, 'i');
+      const numM = block.match(numRegex);
+      if (numM) return numM[1].trim();
+      return '';
+    };
+
+    const soal = getField('Soal|soal|question|pertanyaan|teks|text');
+    const optA = getField('Pilihan_A|pilihan_a|opsi_a|A');
+    const optB = getField('Pilihan_B|pilihan_b|opsi_b|B');
+    const optC = getField('Pilihan_C|pilihan_c|opsi_c|C');
+    const optD = getField('Pilihan_D|pilihan_d|opsi_d|D');
+    const optE = getField('Pilihan_E|pilihan_e|opsi_e|E');
+    const optF = getField('Pilihan_F|pilihan_f|opsi_f|F');
+    const kunci = getField('Kunci_Jawaban_Non_Essay|kunci_jawaban_non_essay|kunci_jawaban|kunci|jawaban_benar|answer|key');
+    const essay = getField('Jawaban_Essay|jawaban_essay|pembahasan|pedoman_essay');
+    const jenis = getField('Jenis_Soal|jenis_soal|type');
+    const nomor = parseInt(getField('Nomor|nomor|no|No')) || (index + 1);
+
+    if (!soal && !optA) return null;
+
+    return normalizeQuestionObject({
+      Nomor: nomor,
+      Jenis_Soal: jenis || (optA ? 'PG' : 'ESSAY'),
+      Nilai: 10,
+      Nama_Materi: getField('Nama_Materi|nama_materi|materi|topik'),
+      Judul_Referensi: getField('Judul_Referensi|judul_referensi|judul'),
+      Isi_Referensi: getField('Isi_Referensi|isi_referensi|stimulus|bacaan'),
+      Soal: soal || `Soal nomor ${nomor}`,
+      File_Audio_Video: '',
+      Pilihan_A: optA,
+      Pilihan_B: optB,
+      Pilihan_C: optC,
+      Pilihan_D: optD,
+      Pilihan_E: optE,
+      Pilihan_F: optF,
+      Kunci_Jawaban_Non_Essay: kunci,
+      Jawaban_Essay: essay
+    }, index);
+  };
+
+  // Multi-tier resilient JSON string repair engine
+  const repairJsonString = (input: string): string => {
+    if (!input || typeof input !== 'string') return '';
+
+    let text = input
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+      .trim();
+
+    // Strip markdown code fences if wrapped
+    const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fenceMatch) {
+      text = fenceMatch[1].trim();
+    } else {
+      text = text.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```$/, '').trim();
+    }
+
+    // Convert Python literals when appearing as values
+    text = text.replace(/:\s*True\b/g, ': true')
+               .replace(/:\s*False\b/g, ': false')
+               .replace(/:\s*None\b/g, ': null');
+
+    // Normalize smart quotes
+    text = text.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+
+    // Character-by-character scanner for safe LaTeX and control character escaping
+    let out = '';
+    let inString = false;
+    let i = 0;
+    const len = text.length;
+
+    while (i < len) {
+      const char = text[i];
+
+      if (!inString) {
+        if (char === '"') {
+          inString = true;
+          out += char;
+          i++;
+        } else {
+          out += char;
+          i++;
+        }
+      } else {
+        // Inside string literal
+        if (char === '"') {
+          inString = false;
+          out += char;
+          i++;
+        } else if (char === '\\') {
+          const next = text[i + 1];
+          if (next === undefined) {
+            out += '\\\\';
+            i++;
+            break;
+          }
+
+          if (next === '\\') {
+            // Already escaped backslash "\\" -> preserve exactly as "\\"
+            out += '\\\\';
+            i += 2;
+          } else if (next === '"') {
+            // Escaped quote '\"'
+            out += '\\"';
+            i += 2;
+          } else if (next === '/') {
+            out += '\\/';
+            i += 2;
+          } else if (next === 'u' && /^[0-9a-fA-F]{4}$/.test(text.slice(i + 2, i + 6))) {
+            // Valid unicode escape \uXXXX
+            out += text.slice(i, i + 6);
+            i += 6;
+          } else {
+            // Check for LaTeX commands starting with letters (including times, frac, theta, etc.)
+            const remainder = text.slice(i + 1);
+            const latexWordMatch = remainder.match(/^(?:times|theta|text|tan|tau|triangle|frac|forall|rho|right|root|rad|neq|nabla|nu|neg|bullet|beta|bar|binom|sum|sqrt|sin|cos|log|ln|lim|le|ge|pm|partial|cdot|circ|alpha|approx|vec|hat|omega|gamma|lambda|phi|psi|sigma|delta|pi|infty|int)\b/i);
+
+            if (latexWordMatch) {
+              out += '\\\\' + latexWordMatch[0];
+              i += 1 + latexWordMatch[0].length;
+            } else if (next === 'n' || next === 'r' || next === 't' || next === 'b' || next === 'f') {
+              out += '\\' + next;
+              i += 2;
+            } else {
+              // Invalid JSON escape sequence (e.g. \s in \sqrt, \{, \}, \_, \$, \., etc.) -> double it
+              out += '\\\\' + next;
+              i += 2;
+            }
+          }
+        } else if (char === '\n') {
+          // Unescaped literal newline inside string
+          out += '\\n';
+          i++;
+        } else if (char === '\r') {
+          // Unescaped literal carriage return inside string
+          out += '\\r';
+          i++;
+        } else if (char === '\t') {
+          // Unescaped literal tab inside string
+          out += '\\t';
+          i++;
+        } else {
+          out += char;
+          i++;
+        }
+      }
+    }
+
+    if (inString) {
+      out += '"';
+    }
+
+    // Remove trailing commas before closing brackets/braces
+    out = out.replace(/,\s*([\]}])/g, '$1');
+
+    return out.trim();
+  };
+
   // Helper to extract questions from plain text if AI answered in conversational/markdown format instead of strict JSON
   const parseFromPlainText = (text: string): QuestionData[] => {
     if (!text || typeof text !== 'string') return [];
@@ -1552,56 +1720,60 @@ export default function App() {
     const cleaned = text
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
-      .replace(/```(?:json)?/gi, '')
+      .replace(/```(?:json|markdown)?/gi, '')
+      .replace(/```/g, '')
       .trim();
 
-    // Pattern: splits questions by numbers like "1.", "1)", "Soal 1:", "**1.**"
-    const questionBlocks = cleaned.split(/(?:^|\n)\s*(?:\*\*)?(?:Soal\s*)?(\d+)[\.\:\)]\s*(?:\*\*)?/i);
+    // Pattern: splits questions by markdown headers or numbers:
+    // e.g. "### Soal 1", "### 1.", "1.", "1)", "Soal 1:", "Pertanyaan 1:", "**1.**", "No. 1"
+    const questionBlocks = cleaned.split(/(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*\*)?(?:(?:Soal|Nomor|Pertanyaan|No\.?)\s*)?(\d+)[\.\:\)]\s*(?:\*\*)?/i);
 
     const results: QuestionData[] = [];
-    if (questionBlocks.length > 2) {
+    if (questionBlocks.length >= 3) {
       for (let i = 1; i < questionBlocks.length; i += 2) {
         const qNum = parseInt(questionBlocks[i]) || Math.floor(i / 2) + 1;
         const blockContent = questionBlocks[i + 1] || '';
 
-        // Extract Options: A., B., C., D., E., F.
+        // Extract Options: A, B, C, D, E, F with various bullet styles
         let soalText = blockContent;
         const options: Record<string, string> = {};
 
-        const optRegex = /(?:^|\n)\s*(?:\*\*)?([A-F])[\.\:\)]\s*(?:\*\*)?([^\n]+)/gi;
+        const optRegex = /(?:^|\n)\s*(?:[\*\-\•]\s*)?(?:\*\*)?(?:[\[\(])?([A-Fa-f])[\]\)\.\:]\s*(?:\*\*)?\s*([^\n]+)/g;
         let optMatch;
         let firstOptIdx = -1;
         while ((optMatch = optRegex.exec(blockContent)) !== null) {
           if (firstOptIdx === -1) firstOptIdx = optMatch.index;
           const letter = optMatch[1].toUpperCase();
-          options[letter] = optMatch[2].trim();
+          if (!options[letter]) {
+            options[letter] = optMatch[2].trim();
+          }
         }
 
         if (firstOptIdx !== -1) {
           soalText = blockContent.substring(0, firstOptIdx).trim();
         }
 
-        // Extract answer key: "Kunci Jawaban: A" or "Jawaban: B" or "Kunci: C"
+        // Extract answer key
         let kunci = '';
-        const keyMatch = blockContent.match(/(?:Kunci(?:[\s_]*Jawaban)?|Jawaban(?:[\s_]*Benar)?|Key|Answer)\s*[:=]\s*([A-Fa-f,\s]+)/i);
+        const keyMatch = blockContent.match(/(?:Kunci(?:[\s_]*Jawaban)?|Jawaban(?:[\s_]*Benar)?|Key|Answer)\s*[:=]\s*(?:\*\*)?(?:[\[\(])?([A-Fa-f,\s]+)(?:[\]\)])?(?:\*\*)?/i);
         if (keyMatch) {
           kunci = keyMatch[1].replace(/[^A-Fa-f,]/g, '').toUpperCase().trim();
         }
 
-        // Extract essay answer if present
+        // Extract essay answer or explanation if present
         let essay = '';
         const essayMatch = blockContent.match(/(?:Jawaban(?:[\s_]*Essay)?|Pedoman(?:[\s_]*Essay)?|Pembahasan|Penjelasan)\s*[:=]\s*([^\n]+)/i);
         if (essayMatch) {
           essay = essayMatch[1].trim();
         }
 
-        // Clean soalText from leading prefixes like "Soal:", "Pertanyaan:"
-        soalText = soalText.replace(/^(?:Soal|Pertanyaan)\s*[:\-]\s*/i, '').trim();
+        soalText = soalText.replace(/^(?:Soal|Pertanyaan|Nomor|No\.?)\s*[:\-]\s*/i, '').trim();
 
-        if (soalText || Object.keys(options).length > 0) {
+        const hasOptions = Object.keys(options).length > 0;
+        if (soalText || hasOptions) {
           results.push(normalizeQuestionObject({
             Nomor: qNum,
-            Jenis_Soal: 'PG',
+            Jenis_Soal: hasOptions ? 'PG' : 'ESSAY',
             Nilai: 10,
             Nama_Materi: '',
             Judul_Referensi: '',
@@ -1614,88 +1786,41 @@ export default function App() {
             Pilihan_D: options['D'] || '',
             Pilihan_E: options['E'] || '',
             Pilihan_F: options['F'] || '',
-            Kunci_Jawaban_Non_Essay: kunci || 'A',
+            Kunci_Jawaban_Non_Essay: kunci || (hasOptions ? 'A' : ''),
             Jawaban_Essay: essay
           }, results.length));
         }
       }
     }
-    return results;
-  };
 
-  // Helper to repair common AI JSON flaws (LaTeX backslashes, trailing commas, raw newlines, smart quotes, python literals)
-  const sanitizeJsonString = (str: string): string => {
-    if (!str || typeof str !== 'string') return '';
-    let s = str;
-    // 1. Remove thinking / reasoning tags (DeepSeek R1, Qwen, etc.)
-    s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
-    s = s.replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '');
-
-    // 2. Strip markdown fences and code tags
-    s = s.replace(/```(?:json)?\s*([\s\S]*?)\s*```/gi, '$1');
-    s = s.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```$/, '');
-
-    // 3. Convert Python boolean/null literals to JSON
-    s = s.replace(/:\s*True\b/g, ': true');
-    s = s.replace(/:\s*False\b/g, ': false');
-    s = s.replace(/:\s*None\b/g, ': null');
-
-    // 4. Normalize smart quotes
-    s = s.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
-
-    // 5. Fix LaTeX backslashes that break standard JSON parsing
-    s = s.replace(/\\(frac|times|text|theta|tau|tan|triangle|begin|beta|bar|bullet|binom|right|rho|rad|root|forall|approx|alpha|le|ge|neq|pm|cdot|circ|degree|sqrt|partial|sum|int|infty|lim|sin|cos|log|ln|vec|hat|over|under)/gi, '\\\\$1');
-    s = s.replace(/\\([a-zA-Z])/g, (m, letter) => {
-      if (['b', 'f', 'n', 'r', 't', 'u'].includes(letter)) return m;
-      return '\\\\' + letter;
-    });
-
-    // 6. Fix unquoted keys e.g. { Nomor: 1, Soal: "..." }
-    s = s.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
-
-    // 7. Fix raw newlines and tabs inside quoted JSON strings
-    let inStr = false;
-    let isEsc = false;
-    let fixed = '';
-    for (let i = 0; i < s.length; i++) {
-      const ch = s[i];
-      if (isEsc) {
-        fixed += ch;
-        isEsc = false;
-        continue;
+    // Fallback: If split by number failed, but there is still some text with options
+    if (results.length === 0 && cleaned.length > 20) {
+      const optRegex = /(?:^|\n)\s*(?:[\*\-\•]\s*)?(?:\*\*)?(?:[\[\(])?([A-Fa-f])[\]\)\.\:]\s*(?:\*\*)?\s*([^\n]+)/g;
+      const options: Record<string, string> = {};
+      let optMatch;
+      let firstOptIdx = -1;
+      while ((optMatch = optRegex.exec(cleaned)) !== null) {
+        if (firstOptIdx === -1) firstOptIdx = optMatch.index;
+        const letter = optMatch[1].toUpperCase();
+        if (!options[letter]) options[letter] = optMatch[2].trim();
       }
-      if (ch === '\\') {
-        fixed += ch;
-        isEsc = true;
-        continue;
+      if (Object.keys(options).length > 0) {
+        const qText = firstOptIdx !== -1 ? cleaned.substring(0, firstOptIdx).trim() : cleaned;
+        results.push(normalizeQuestionObject({
+          Nomor: 1,
+          Jenis_Soal: 'PG',
+          Nilai: 10,
+          Soal: qText,
+          Pilihan_A: options['A'] || '',
+          Pilihan_B: options['B'] || '',
+          Pilihan_C: options['C'] || '',
+          Pilihan_D: options['D'] || '',
+          Kunci_Jawaban_Non_Essay: 'A'
+        }, 0));
       }
-      if (ch === '"') {
-        inStr = !inStr;
-        fixed += ch;
-        continue;
-      }
-      if (inStr) {
-        if (ch === '\n') {
-          fixed += '\\n';
-          continue;
-        }
-        if (ch === '\r') {
-          fixed += '\\r';
-          continue;
-        }
-        if (ch === '\t') {
-          fixed += '\\t';
-          continue;
-        }
-      }
-      fixed += ch;
     }
-    s = fixed;
 
-    // 8. Remove trailing commas before closing braces/brackets
-    s = s.replace(/,\s*([\]}])/g, '$1');
-
-    return s.trim();
+    return results;
   };
 
   // Robust, multi-strategy JSON parser for questions array from any model (Gemini, Groq, DeepSeek, OpenAI, 9router, Ollama)
@@ -1709,10 +1834,17 @@ export default function App() {
       .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
       .trim();
 
-    const candidatesToTry: string[] = [
-      cleanBase,
-      sanitizeJsonString(cleanBase)
-    ];
+    // Strip markdown code fences
+    let unFenced = cleanBase;
+    const fenceMatch = cleanBase.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fenceMatch) {
+      unFenced = fenceMatch[1].trim();
+    } else {
+      unFenced = cleanBase.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```$/, '').trim();
+    }
+
+    const repaired = repairJsonString(unFenced);
+    const candidatesToTry: string[] = [unFenced, repaired, cleanBase];
 
     // Helper to unwrap parsed output
     const extractArrayFromParsed = (val: any): QuestionData[] | null => {
@@ -1744,7 +1876,7 @@ export default function App() {
       return null;
     };
 
-    // Strategy 1 & 2: Direct parse of candidates
+    // Strategy 1: Direct parse of candidates
     for (const cand of candidatesToTry) {
       try {
         const parsed = JSON.parse(cand);
@@ -1753,7 +1885,7 @@ export default function App() {
       } catch { }
     }
 
-    // Strategy 3: Substring between first '[' and last ']'
+    // Strategy 2: Substring between first '[' and last ']'
     for (const cand of candidatesToTry) {
       const startIdx = cand.indexOf('[');
       const endIdx = cand.lastIndexOf(']');
@@ -1765,8 +1897,8 @@ export default function App() {
           if (res && res.length > 0) return res;
         } catch {
           try {
-            const repaired = sanitizeJsonString(sub);
-            const parsed = JSON.parse(repaired);
+            const repSub = repairJsonString(sub);
+            const parsed = JSON.parse(repSub);
             const res = extractArrayFromParsed(parsed);
             if (res && res.length > 0) return res;
           } catch { }
@@ -1774,7 +1906,7 @@ export default function App() {
       }
     }
 
-    // Strategy 4: Substring between first '{' and last '}'
+    // Strategy 3: Substring between first '{' and last '}'
     for (const cand of candidatesToTry) {
       const objStart = cand.indexOf('{');
       const objEnd = cand.lastIndexOf('}');
@@ -1786,8 +1918,8 @@ export default function App() {
           if (res && res.length > 0) return res;
         } catch {
           try {
-            const repaired = sanitizeJsonString(sub);
-            const parsed = JSON.parse(repaired);
+            const repSub = repairJsonString(sub);
+            const parsed = JSON.parse(repSub);
             const res = extractArrayFromParsed(parsed);
             if (res && res.length > 0) return res;
           } catch { }
@@ -1795,16 +1927,16 @@ export default function App() {
       }
     }
 
-    // Strategy 5: Truncated JSON recovery (array cuts off before closing ']')
+    // Strategy 4: Truncated JSON recovery (array cuts off before closing ']')
     for (const cand of candidatesToTry) {
       const startIdx = cand.indexOf('[');
       if (startIdx !== -1) {
         const lastBrace = cand.lastIndexOf('}');
         if (lastBrace > startIdx) {
           const healed = cand.substring(startIdx, lastBrace + 1) + ']';
-          const sanitizedHealed = sanitizeJsonString(healed);
           try {
-            const parsed = JSON.parse(sanitizedHealed);
+            const repHealed = repairJsonString(healed);
+            const parsed = JSON.parse(repHealed);
             const res = extractArrayFromParsed(parsed);
             if (res && res.length > 0) return res;
           } catch { }
@@ -1812,7 +1944,7 @@ export default function App() {
       }
     }
 
-    // Strategy 6: Depth-aware brace matcher for individual objects (Handles LaTeX braces {} safely!)
+    // Strategy 5: Depth-aware brace matcher for individual objects (Preserves LaTeX braces {} safely)
     try {
       const individualObjects: QuestionData[] = [];
       let inString = false;
@@ -1843,11 +1975,17 @@ export default function App() {
             if (depth === 0 && startPos !== -1) {
               const block = cleanBase.substring(startPos, i + 1);
               try {
-                const parsed = JSON.parse(sanitizeJsonString(block));
+                const parsed = JSON.parse(repairJsonString(block));
                 if (parsed && typeof parsed === 'object' && (parsed.Soal || parsed.soal || parsed.question || parsed.pertanyaan || parsed.Pilihan_A || parsed.A)) {
                   individualObjects.push(normalizeQuestionObject(parsed, individualObjects.length));
                 }
-              } catch { }
+              } catch {
+                // Try regex field extractor on the block if JSON.parse still fails
+                const extracted = extractFieldsFromObjectBlock(block, individualObjects.length);
+                if (extracted) {
+                  individualObjects.push(extracted);
+                }
+              }
               startPos = -1;
             }
           }
@@ -1855,6 +1993,19 @@ export default function App() {
       }
       if (individualObjects.length > 0) {
         return individualObjects;
+      }
+    } catch { }
+
+    // Strategy 6: Regex field extraction on the entire response
+    try {
+      const objectBlocks = cleanBase.split(/(?:\{(?=\s*"(?:Nomor|Soal|Jenis_Soal)"))/i);
+      if (objectBlocks.length > 1) {
+        const fieldQuestions: QuestionData[] = [];
+        for (const b of objectBlocks) {
+          const item = extractFieldsFromObjectBlock('{' + b, fieldQuestions.length);
+          if (item) fieldQuestions.push(item);
+        }
+        if (fieldQuestions.length > 0) return fieldQuestions;
       }
     } catch { }
 
@@ -1995,7 +2146,47 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
 
       const data = await res.json();
       const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
-      const parsedQuestions = parseQuestionsJson(rawText);
+      let parsedQuestions: QuestionData[] = [];
+      try {
+        parsedQuestions = parseQuestionsJson(rawText);
+      } catch (parseErr) {
+        console.warn(`[Auto-Fallback Parse] Gemini ${targetModel} menghasilkan format tidak terbaca. Mencoba model cadangan...`);
+        const GEMINI_FALLBACKS = [
+          'gemini-2.5-flash',
+          'gemini-2.0-flash',
+          'gemini-2.5-flash-lite',
+          'gemini-2.0-flash-lite',
+          'gemini-3-flash',
+          'gemini-3.1-flash-lite',
+          'gemini-3.5-flash-lite',
+          'gemini-3.6-flash',
+          'gemini-3.8-flash',
+          'gemini-2.5-pro',
+          'gemini-3.1-pro',
+          'gemini-4-argon',
+          'gemini-4-carbon',
+          'gemini-4-hydrogen'
+        ];
+        for (const cand of GEMINI_FALLBACKS) {
+          if (cand === targetModel) continue;
+          try {
+            const retryRes = await requestModel(cand);
+            if (retryRes.ok) {
+              const retryData = await retryRes.json();
+              const retryRaw = retryData.candidates?.[0]?.content?.parts?.[0]?.text || '';
+              const retryParsed = parseQuestionsJson(retryRaw);
+              if (retryParsed && retryParsed.length > 0) {
+                parsedQuestions = retryParsed;
+                targetModel = cand;
+                break;
+              }
+            }
+          } catch {}
+        }
+        if (parsedQuestions.length === 0) {
+          throw parseErr;
+        }
+      }
       return { questions: parsedQuestions, modelUsed: targetModel, provider };
     } else {
       const baseUrl = (payload.customBaseUrl || providerConfig.defaultBaseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
@@ -2143,7 +2334,44 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
 
       const data = await effectiveRes.json();
       const rawText = data.choices?.[0]?.message?.content || '[]';
-      const parsedQuestions = parseQuestionsJson(rawText);
+      let parsedQuestions: QuestionData[] = [];
+      try {
+        parsedQuestions = parseQuestionsJson(rawText);
+      } catch (parseErr) {
+        console.warn(`[Auto-Fallback Parse] ${provider} model ${effectiveTargetModel} menghasilkan format tidak terbaca. Mencoba model cadangan...`);
+        const fallbacks = PROVIDER_FALLBACK_MAP[provider] || [];
+        for (const cand of fallbacks) {
+          if (cand === effectiveTargetModel) continue;
+          try {
+            const retryRes = await fetch(`${baseUrl}/chat/completions`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                model: cand,
+                messages: [
+                  { role: 'system', content: 'Anda adalah asisten pembuat soal ujian profesional berformat JSON. Wajib berikan output HANYA berupa array JSON soal [ ... ], tanpa teks lain dan tanpa kode pembungkus markdown.' },
+                  { role: 'user', content: prompt }
+                ],
+                temperature: Math.max(0, Math.min(1.5, payload.temperature ?? 0.7)),
+                max_tokens: 4096
+              })
+            });
+            if (retryRes.ok) {
+              const retryData = await retryRes.json();
+              const retryRaw = retryData.choices?.[0]?.message?.content || '';
+              const retryParsed = parseQuestionsJson(retryRaw);
+              if (retryParsed && retryParsed.length > 0) {
+                parsedQuestions = retryParsed;
+                effectiveTargetModel = cand;
+                break;
+              }
+            }
+          } catch {}
+        }
+        if (parsedQuestions.length === 0) {
+          throw parseErr;
+        }
+      }
       return { questions: parsedQuestions, modelUsed: effectiveTargetModel, provider };
     }
   };
@@ -2210,12 +2438,26 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
         } else {
           data = await response.json();
           if (!response.ok) {
-            throw new Error(data.error || 'Gagal generate soal dari server.');
+            if (customApiKey || aiProvider === 'custom' || aiProvider === '9router') {
+              console.warn('[Auto-Fallback Client] Server gagal generate soal, mencoba request client-side langsung...');
+              try {
+                data = await callAiClientSide(payload);
+              } catch (clientErr: any) {
+                throw new Error(data.error || clientErr.message || 'Gagal generate soal dari server.');
+              }
+            } else {
+              throw new Error(data.error || 'Gagal generate soal dari server.');
+            }
           }
         }
       } catch (networkOrApiError: any) {
-        if ((customApiKey || aiProvider === 'custom' || aiProvider === '9router') && (networkOrApiError.message?.includes('Failed to fetch') || networkOrApiError.message?.toLowerCase().includes('fetch failed') || networkOrApiError.message?.includes('404'))) {
-          data = await callAiClientSide(payload);
+        if (customApiKey || aiProvider === 'custom' || aiProvider === '9router') {
+          console.warn('[Auto-Fallback Client] Terjadi kendala koneksi server, mencoba request client-side langsung...');
+          try {
+            data = await callAiClientSide(payload);
+          } catch {
+            throw networkOrApiError;
+          }
         } else {
           throw networkOrApiError;
         }
