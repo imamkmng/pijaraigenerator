@@ -1,0 +1,8 @@
+{
+  "name": "Remix: AI Generator Soal Pijar-Version 2.0",
+  "description": "",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
