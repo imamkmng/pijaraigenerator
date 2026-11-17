@@ -444,9 +444,18 @@ Hanya return JSON valid tanpa dibungkus kode block markdown \`\`\`json.`;
                   const GEMINI_FALLBACKS = [
                     'gemini-2.5-flash',
                     'gemini-2.0-flash',
-                    'gemini-1.5-flash',
+                    'gemini-2.5-flash-lite',
                     'gemini-2.0-flash-lite',
-                    'gemini-1.5-flash-8b'
+                    'gemini-3-flash',
+                    'gemini-3.1-flash-lite',
+                    'gemini-3.5-flash-lite',
+                    'gemini-3.6-flash',
+                    'gemini-3.8-flash',
+                    'gemini-2.5-pro',
+                    'gemini-3.1-pro',
+                    'gemini-4-argon',
+                    'gemini-4-carbon',
+                    'gemini-4-hydrogen'
                   ];
                   for (const cand of GEMINI_FALLBACKS) {
                     if (cand === targetModel) continue;

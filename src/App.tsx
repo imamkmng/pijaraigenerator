@@ -772,12 +772,20 @@ export const AI_PROVIDERS: AIProviderConfig[] = [
     fastModel: 'gemini-2.0-flash',
     reasoningModel: 'gemini-2.5-pro',
     models: [
+      { id: 'gemini-2.0-flash', name: 'Gemini 2 Flash', desc: 'Next-Gen Cepat & Sangat Stabil' },
+      { id: 'gemini-2.0-flash-lite', name: 'Gemini 2 Flash Lite', desc: 'Ringan, Cepat & Hemat Kuota' },
       { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', desc: 'Sangat Cepat & Cerdas (Rekomendasi Utama)' },
+      { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', desc: 'Versi Ringan Efisien' },
       { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', desc: 'Penalaran Tingkat Tinggi / Soal HOTS' },
-      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', desc: 'Next-Gen Cepat & Sangat Stabil' },
-      { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite', desc: 'Ringan & Efisien' },
-      { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', desc: 'Stabil dengan Kuota Bebas' },
-      { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', desc: 'Analisis Konteks Panjang' },
+      { id: 'gemini-3-flash', name: 'Gemini 3 Flash', desc: 'Generasi Gemini 3 Cepat' },
+      { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', desc: 'Penalaran Lanjut Canggih' },
+      { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', desc: 'Model Ringan Cepat Generasi 3.1' },
+      { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', desc: 'Model Kecepatan Tinggi Generasi 3.6' },
+      { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', desc: 'Model Ringan Generasi 3.5' },
+      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', desc: 'Performa Cerdas Mutakhir 3.8' },
+      { id: 'gemini-4-argon', name: 'Gemini 4 Argon', desc: 'Edisi Khusus Argon Generasi 4' },
+      { id: 'gemini-4-carbon', name: 'Gemini 4 Carbon', desc: 'Edisi Khusus Carbon Generasi 4' },
+      { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen', desc: 'Edisi Khusus Hydrogen Generasi 4' },
     ]
   },
   {
@@ -1803,9 +1811,18 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
           const GEMINI_FALLBACKS = [
             'gemini-2.5-flash',
             'gemini-2.0-flash',
-            'gemini-1.5-flash',
+            'gemini-2.5-flash-lite',
             'gemini-2.0-flash-lite',
-            'gemini-1.5-flash-8b'
+            'gemini-3-flash',
+            'gemini-3.1-flash-lite',
+            'gemini-3.5-flash-lite',
+            'gemini-3.6-flash',
+            'gemini-3.8-flash',
+            'gemini-2.5-pro',
+            'gemini-3.1-pro',
+            'gemini-4-argon',
+            'gemini-4-carbon',
+            'gemini-4-hydrogen'
           ];
           for (const cand of GEMINI_FALLBACKS) {
             if (cand === targetModel) continue;
