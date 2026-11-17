@@ -1264,6 +1264,23 @@ export default function App() {
     } catch { }
   }, [soundEnabled]);
 
+  const [autoFallbackQuota, setAutoFallbackQuota] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('autoFallbackQuota');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('autoFallbackQuota', String(autoFallbackQuota));
+    } catch { }
+  }, [autoFallbackQuota]);
+
+  const [fallbackNotice, setFallbackNotice] = useState<string>('');
+
   const [isGenerating, setIsGenerating] = useState(false);
 
   // Safe parsing to prevent corrupt localStorage crashes
@@ -1773,10 +1790,36 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
       let targetModel = resolveEffectiveModel('gemini', payload.customModel);
       let res = await requestModel(targetModel);
 
-      // Auto-fallback if model 404
-      if (res.status === 404 && targetModel !== 'gemini-2.5-flash') {
-        res = await requestModel('gemini-2.5-flash');
-        targetModel = 'gemini-2.5-flash';
+      // Otomatis ganti ke model dengan limit lebih besar jika kuota habis (429), sibuk (503), atau model tidak ada (404)
+      if (!res.ok && autoFallbackQuota) {
+        const errClone = await res.clone().json().catch(() => ({}));
+        const errMsg = String(errClone?.error?.message || '').toLowerCase();
+        const shouldFallback = res.status === 429 || res.status === 503 || res.status === 404 ||
+          errMsg.includes('quota') || errMsg.includes('rate') || errMsg.includes('exhausted') ||
+          errMsg.includes('overloaded') || errMsg.includes('high demand') || errMsg.includes('capacity');
+
+        if (shouldFallback) {
+          console.warn(`[Auto-Fallback] Model ${targetModel} batas kuota/sibuk (${res.status}: ${errMsg}). Mencari model cadangan berkuota besar...`);
+          const GEMINI_FALLBACKS = [
+            'gemini-2.5-flash',
+            'gemini-2.0-flash',
+            'gemini-1.5-flash',
+            'gemini-2.0-flash-lite',
+            'gemini-1.5-flash-8b'
+          ];
+          for (const cand of GEMINI_FALLBACKS) {
+            if (cand === targetModel) continue;
+            try {
+              const retryRes = await requestModel(cand);
+              if (retryRes.ok) {
+                res = retryRes;
+                targetModel = cand;
+                console.info(`[Auto-Fallback] Berhasil dialihkan ke model berkuota aktif: ${cand}`);
+                break;
+              }
+            } catch { }
+          }
+        }
       }
 
       if (!res.ok) {
@@ -1826,6 +1869,53 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
       let effectiveRes = res;
       let effectiveTargetModel = targetModel;
 
+      // Otomatis coba fallback jika kuota habis (429), model tidak ditemukan (404), atau sibuk (503)
+      if (!effectiveRes.ok && autoFallbackQuota) {
+        const errClone = await effectiveRes.clone().json().catch(() => ({}));
+        const errMsg = String(errClone?.error?.message || errClone?.message || '').toLowerCase();
+        const shouldFallback = effectiveRes.status === 429 || effectiveRes.status === 503 || effectiveRes.status === 404 ||
+          errMsg.includes('rate') || errMsg.includes('quota') || errMsg.includes('token') || errMsg.includes('limit') ||
+          errMsg.includes('exhausted') || errMsg.includes('capacity') || errMsg.includes('overloaded');
+
+        if (shouldFallback) {
+          const PROVIDER_FALLBACK_MAP: Record<string, string[]> = {
+            groq: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'gemma2-9b-it', 'mixtral-8x7b-32768'],
+            openai: ['gpt-4o-mini', 'gpt-4o'],
+            deepseek: ['deepseek-chat'],
+            openrouter: ['google/gemini-2.0-flash-001', 'meta-llama/llama-3.3-70b-instruct:free', 'qwen/qwen-2.5-72b-instruct:free', 'mistralai/mistral-7b-instruct:free']
+          };
+
+          const preconfiguredFallbacks = PROVIDER_FALLBACK_MAP[provider] || [];
+          for (const cand of preconfiguredFallbacks) {
+            if (cand === effectiveTargetModel) continue;
+            try {
+              const retryRes = await fetch(`${baseUrl}/chat/completions`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  model: cand,
+                  messages: [
+                    {
+                      role: 'system',
+                      content: 'Anda adalah asisten pembuat soal ujian profesional berformat JSON. Wajib berikan output HANYA berupa array JSON soal [ ... ], tanpa teks lain dan tanpa kode pembungkus markdown.'
+                    },
+                    { role: 'user', content: prompt }
+                  ],
+                  temperature: Math.max(0, Math.min(1.5, payload.temperature ?? 0.7)),
+                  max_tokens: 4096
+                })
+              });
+              if (retryRes.ok) {
+                effectiveRes = retryRes;
+                effectiveTargetModel = cand;
+                console.info(`[Auto-Fallback ${provider}] Berhasil dialihkan ke model berkuota aktif: ${cand}`);
+                break;
+              }
+            } catch { }
+          }
+        }
+      }
+
       if (!effectiveRes.ok) {
         try {
           const mRes = await fetch(`${baseUrl}/models`, { headers });
@@ -1848,7 +1938,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                 );
               });
             for (const cand of cands) {
-              if (cand === targetModel) continue;
+              if (cand === targetModel || cand === effectiveTargetModel) continue;
               const retryRes = await fetch(`${baseUrl}/chat/completions`, {
                 method: 'POST',
                 headers,
@@ -1983,6 +2073,12 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
       setQuestions(fixedQuestions);
       if (data.modelUsed) {
         setLastModelUsed(`${activeProviderConfig.name.split(' ')[0]} • ${data.modelUsed}`);
+        const requested = effectiveModel;
+        if (requested !== 'auto' && data.modelUsed && !data.modelUsed.toLowerCase().includes(requested.toLowerCase()) && !requested.toLowerCase().includes(data.modelUsed.toLowerCase())) {
+          setFallbackNotice(`Model dialihkan otomatis ke "${data.modelUsed}" karena kuota/kapasitas model "${requested}" sedang penuh atau limit tercapai.`);
+        } else {
+          setFallbackNotice('');
+        }
       }
 
       const newHistory: HistoryItem = {
@@ -2514,6 +2610,24 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
             {error && (
               <div className="bg-red-50 border border-red-200 text-red-800 text-sm px-3 py-2 rounded-lg font-medium">
                 <strong>Error:</strong> {error}
+              </div>
+            )}
+
+            {fallbackNotice && (
+              <div className="bg-amber-50 border border-amber-200 text-amber-900 text-xs px-3 py-2.5 rounded-lg flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <span className="font-bold block">Pengalihan Otomatis Model</span>
+                  <span>{fallbackNotice}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setFallbackNotice('')}
+                  className="text-amber-500 hover:text-amber-800 p-0.5 cursor-pointer"
+                  title="Tutup pemberitahuan"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
               </div>
             )}
 
@@ -3462,6 +3576,25 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                       setSoundEnabled(e.target.checked);
                       if (e.target.checked) playSuccessSound(true);
                     }}
+                    className="w-4 h-4 text-indigo-600 rounded border-slate-300 accent-indigo-600 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
+                  />
+                </label>
+              </div>
+
+              {/* Auto Fallback Quota Setting */}
+              <div className="pt-2 border-t border-slate-100">
+                <label className="flex items-center justify-between cursor-pointer p-3 bg-slate-50 hover:bg-slate-100/80 rounded-xl border border-slate-200 transition-colors">
+                  <div className="flex items-center gap-2.5">
+                    <RefreshCw className="w-4 h-4 text-indigo-600 shrink-0" />
+                    <div>
+                      <span className="text-xs font-bold text-slate-800 block">Alihkan Otomatis Jika Kuota Habis</span>
+                      <span className="text-[11px] text-slate-500">Otomatis pindah ke model dengan limit lebih besar saat terkena rate limit / 429</span>
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={autoFallbackQuota}
+                    onChange={(e) => setAutoFallbackQuota(e.target.checked)}
                     className="w-4 h-4 text-indigo-600 rounded border-slate-300 accent-indigo-600 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600"
                   />
                 </label>

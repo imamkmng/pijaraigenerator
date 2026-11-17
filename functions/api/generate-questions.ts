@@ -518,44 +518,75 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
 
       // Auto-fallback: if requested model fails, dynamically test available models from user's account!
       if (!res.ok) {
-        try {
-          const mHeaders: Record<string, string> = {};
-          if (apiKey) mHeaders['Authorization'] = `Bearer ${apiKey}`;
-          if (provider === 'openrouter') {
-            mHeaders['HTTP-Referer'] = 'https://cbtpijar.app';
-            mHeaders['X-Title'] = 'CBT Pijar AI Generator';
-          }
-          const mRes = await fetch(`${baseUrl.replace(/\/+$/, '')}/models`, { headers: mHeaders });
-          if (mRes.ok) {
-            const mData: any = await mRes.json();
-            const rawList = Array.isArray(mData.data) ? mData.data : (Array.isArray(mData.models) ? mData.models : []);
-            const candidates = rawList
-              .map((m: any) => (typeof m === 'string' ? m : m.id))
-              .filter((id: string) => {
-                if (!id) return false;
-                const low = id.toLowerCase();
-                return !(
-                  low.includes('whisper') ||
-                  low.includes('embed') ||
-                  low.includes('safeguard') ||
-                  low.includes('prompt-guard') ||
-                  low.includes('moderation') ||
-                  low.includes('dall-e') ||
-                  low.includes('tts')
-                );
-              });
+        const errClone: any = await res.clone().json().catch(() => ({}));
+        const apiMsg = String(errClone.error?.message || errClone.message || '').toLowerCase();
+        const shouldFallback = res.status === 429 || res.status === 503 || res.status === 404 ||
+          apiMsg.includes('rate') || apiMsg.includes('quota') || apiMsg.includes('token') || apiMsg.includes('limit') ||
+          apiMsg.includes('exhausted') || apiMsg.includes('capacity') || apiMsg.includes('overloaded');
 
-            for (const cand of candidates) {
-              if (cand === model) continue;
+        if (shouldFallback) {
+          const PROVIDER_FALLBACK_MAP: Record<string, string[]> = {
+            groq: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'qwen/qwen3.8-27b', 'gemma2-9b-it', 'mixtral-8x7b-32768'],
+            openai: ['gpt-4o-mini', 'gpt-4o'],
+            deepseek: ['deepseek-chat'],
+            openrouter: ['google/gemini-2.0-flash-001', 'meta-llama/llama-3.3-70b-instruct:free', 'qwen/qwen-2.5-72b-instruct:free', 'mistralai/mistral-7b-instruct:free']
+          };
+
+          const preconfiguredFallbacks = PROVIDER_FALLBACK_MAP[provider] || [];
+          for (const cand of preconfiguredFallbacks) {
+            if (cand === model) continue;
+            try {
               const retryRes = await requestOpenAICompatible(baseUrl, apiKey, cand, prompt, temperature, provider);
               if (retryRes.ok) {
                 res = retryRes;
                 model = cand;
+                console.info(`[Auto-Fallback Cloudflare ${provider}] Berhasil dialihkan ke model: ${cand}`);
                 break;
               }
-            }
+            } catch { }
           }
-        } catch {}
+        }
+
+        if (!res.ok) {
+          try {
+            const mHeaders: Record<string, string> = {};
+            if (apiKey) mHeaders['Authorization'] = `Bearer ${apiKey}`;
+            if (provider === 'openrouter') {
+              mHeaders['HTTP-Referer'] = 'https://cbtpijar.app';
+              mHeaders['X-Title'] = 'CBT Pijar AI Generator';
+            }
+            const mRes = await fetch(`${baseUrl.replace(/\/+$/, '')}/models`, { headers: mHeaders });
+            if (mRes.ok) {
+              const mData: any = await mRes.json();
+              const rawList = Array.isArray(mData.data) ? mData.data : (Array.isArray(mData.models) ? mData.models : []);
+              const candidates = rawList
+                .map((m: any) => (typeof m === 'string' ? m : m.id))
+                .filter((id: string) => {
+                  if (!id) return false;
+                  const low = id.toLowerCase();
+                  return !(
+                    low.includes('whisper') ||
+                    low.includes('embed') ||
+                    low.includes('safeguard') ||
+                    low.includes('prompt-guard') ||
+                    low.includes('moderation') ||
+                    low.includes('dall-e') ||
+                    low.includes('tts')
+                  );
+                });
+
+              for (const cand of candidates) {
+                if (cand === model) continue;
+                const retryRes = await requestOpenAICompatible(baseUrl, apiKey, cand, prompt, temperature, provider);
+                if (retryRes.ok) {
+                  res = retryRes;
+                  model = cand;
+                  break;
+                }
+              }
+            }
+          } catch {}
+        }
       }
 
       if (!res.ok) {
@@ -613,19 +644,32 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
 
     let { res, model } = await requestGemini(apiKey, initialModel, prompt, temperature);
 
-    // Fallback if the requested model returns 404 (Not Found)
-    if (res.status === 404 && model !== "gemini-2.5-flash" && model !== "gemini-2.0-flash") {
-      console.warn(`Model ${model} not found (404), falling back to gemini-2.5-flash...`);
-      const fallbackResult = await requestGemini(apiKey, "gemini-2.5-flash", prompt, temperature);
-      if (fallbackResult.res.ok) {
-        res = fallbackResult.res;
-        model = "gemini-2.5-flash";
-      } else {
-        // Try gemini-2.0-flash
-        const fallbackResult2 = await requestGemini(apiKey, "gemini-2.0-flash", prompt, temperature);
-        if (fallbackResult2.res.ok) {
-          res = fallbackResult2.res;
-          model = "gemini-2.0-flash";
+    // Auto-fallback: Jika kuota habis (429), model 404, atau layanan sibuk/overloaded (503)
+    if (!res.ok) {
+      const errClone: any = await res.clone().json().catch(() => ({}));
+      const apiMsg = String(errClone.error?.message || '').toLowerCase();
+      const shouldFallback = res.status === 429 || res.status === 503 || res.status === 404 ||
+        apiMsg.includes('quota') || apiMsg.includes('rate') || apiMsg.includes('exhausted') ||
+        apiMsg.includes('overloaded') || apiMsg.includes('high demand') || apiMsg.includes('capacity');
+
+      if (shouldFallback) {
+        console.warn(`[Auto-Fallback Cloudflare] Gemini ${model} status ${res.status}. Mencari model dengan kuota tersedia...`);
+        const GEMINI_FALLBACKS = [
+          'gemini-2.5-flash',
+          'gemini-2.0-flash',
+          'gemini-1.5-flash',
+          'gemini-2.0-flash-lite',
+          'gemini-1.5-flash-8b'
+        ];
+        for (const cand of GEMINI_FALLBACKS) {
+          if (cand === model) continue;
+          const fallbackResult = await requestGemini(apiKey, cand, prompt, temperature);
+          if (fallbackResult.res.ok) {
+            res = fallbackResult.res;
+            model = cand;
+            console.info(`[Auto-Fallback Cloudflare] Berhasil dialihkan ke ${cand}`);
+            break;
+          }
         }
       }
     }

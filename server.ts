@@ -406,17 +406,41 @@ Hanya return JSON valid tanpa dibungkus kode block markdown \`\`\`json.`;
         },
       });
     } catch (genError: any) {
-      if ((genError.status === 404 || genError.message?.includes("404")) && targetModel !== "gemini-2.5-flash") {
-        console.warn(`Model ${targetModel} not found, retrying with gemini-2.5-flash...`);
-        targetModel = "gemini-2.5-flash";
-        response = await ai.models.generateContent({
-          model: targetModel,
-          contents: prompt,
-          config: {
-            responseMimeType: "application/json",
-            temperature: Math.max(0, Math.min(1, temperature)),
-          },
-        });
+      const errMsg = String(genError.message || '').toLowerCase();
+      const isQuotaOrBusy = genError.status === 429 || genError.status === 503 || genError.status === 404 ||
+        errMsg.includes('quota') || errMsg.includes('rate') || errMsg.includes('exhausted') ||
+        errMsg.includes('overloaded') || errMsg.includes('high demand') || errMsg.includes('capacity');
+
+      if (isQuotaOrBusy) {
+        console.warn(`[Auto-Fallback Server] Model ${targetModel} batas kuota/sibuk (${genError.status}: ${errMsg}). Mencari model cadangan...`);
+        const GEMINI_FALLBACKS = [
+          'gemini-2.5-flash',
+          'gemini-2.0-flash',
+          'gemini-1.5-flash',
+          'gemini-2.0-flash-lite',
+          'gemini-1.5-flash-8b'
+        ];
+        let recovered = false;
+        for (const cand of GEMINI_FALLBACKS) {
+          if (cand === targetModel) continue;
+          try {
+            response = await ai.models.generateContent({
+              model: cand,
+              contents: prompt,
+              config: {
+                responseMimeType: "application/json",
+                temperature: Math.max(0, Math.min(1, temperature)),
+              },
+            });
+            targetModel = cand;
+            recovered = true;
+            console.info(`[Auto-Fallback Server] Berhasil dialihkan ke model: ${cand}`);
+            break;
+          } catch {}
+        }
+        if (!recovered) {
+          throw genError;
+        }
       } else {
         throw genError;
       }

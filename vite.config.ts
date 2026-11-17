@@ -431,11 +431,34 @@ Hanya return JSON valid tanpa dibungkus kode block markdown \`\`\`json.`;
               let geminiRes = await callApi(targetModel);
               let usedModel = targetModel;
 
-              // Fallback if 404
-              if (geminiRes.status === 404 && targetModel !== 'gemini-2.5-flash') {
-                console.warn(`Model ${targetModel} 404, falling back to gemini-2.5-flash...`);
-                geminiRes = await callApi('gemini-2.5-flash');
-                usedModel = 'gemini-2.5-flash';
+              // Auto-fallback: Jika 429 (kuota habis), 503 (sibuk), atau 404
+              if (!geminiRes.ok) {
+                const errData: any = await geminiRes.clone().json().catch(() => ({}));
+                const apiMsg = String(errData.error?.message || '').toLowerCase();
+                const shouldFallback = geminiRes.status === 429 || geminiRes.status === 503 || geminiRes.status === 404 ||
+                  apiMsg.includes('quota') || apiMsg.includes('rate') || apiMsg.includes('exhausted') ||
+                  apiMsg.includes('overloaded') || apiMsg.includes('high demand') || apiMsg.includes('capacity');
+
+                if (shouldFallback) {
+                  console.warn(`[Auto-Fallback Dev] Model ${targetModel} status ${geminiRes.status}. Mencari model dengan kuota tersedia...`);
+                  const GEMINI_FALLBACKS = [
+                    'gemini-2.5-flash',
+                    'gemini-2.0-flash',
+                    'gemini-1.5-flash',
+                    'gemini-2.0-flash-lite',
+                    'gemini-1.5-flash-8b'
+                  ];
+                  for (const cand of GEMINI_FALLBACKS) {
+                    if (cand === targetModel) continue;
+                    const retryRes = await callApi(cand);
+                    if (retryRes.ok) {
+                      geminiRes = retryRes;
+                      usedModel = cand;
+                      console.info(`[Auto-Fallback Dev] Berhasil dialihkan ke ${cand}`);
+                      break;
+                    }
+                  }
+                }
               }
 
               if (!geminiRes.ok) {
