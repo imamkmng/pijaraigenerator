@@ -547,7 +547,390 @@ const NativeSvgDiagram = ({ code, rawSrc }: { code: string; rawSrc?: string }) =
   );
 };
 
+// --- Pollinations.ai 1-Minute Rate Limiter & Queue Engine ---
+export function isPollinationsUrl(url?: string): boolean {
+  if (!url || typeof url !== 'string') return false;
+  const low = url.toLowerCase();
+  return low.includes('image.pollinations.ai') || low.includes('pollinations.ai/prompt/');
+}
+
+export interface PollinationsQueueItem {
+  id: string;
+  url: string;
+  addedAt: number;
+  status: 'waiting' | 'loading' | 'completed' | 'error';
+  queuePosition: number;
+  secondsRemaining: number;
+  blobUrl?: string;
+  error?: string;
+}
+
+type PollinationsListener = (item: PollinationsQueueItem) => void;
+
+class PollinationsQueue {
+  private queue: string[] = [];
+  private items: Map<string, PollinationsQueueItem> = new Map();
+  private blobCache: Map<string, string> = new Map();
+  private listeners: Map<string, Set<PollinationsListener>> = new Map();
+  private lastRequestTime: number = 0;
+  private intervalTimer: any = null;
+  private isProcessing: boolean = false;
+  private readonly INTERVAL_MS = 60000; // 1 menit (60 detik) jeda antrean Pollinations
+
+  public register(url: string, listener: PollinationsListener): () => void {
+    const cleanUrl = url.trim();
+    if (!cleanUrl) return () => {};
+
+    if (!this.listeners.has(cleanUrl)) {
+      this.listeners.set(cleanUrl, new Set());
+    }
+    this.listeners.get(cleanUrl)!.add(listener);
+
+    // Jika sudah pernah berhasil di-render dan tersimpan di cache
+    if (this.blobCache.has(cleanUrl)) {
+      const cached = this.blobCache.get(cleanUrl)!;
+      listener({
+        id: cleanUrl,
+        url: cleanUrl,
+        addedAt: Date.now(),
+        status: 'completed',
+        queuePosition: 0,
+        secondsRemaining: 0,
+        blobUrl: cached
+      });
+      return () => {
+        this.listeners.get(cleanUrl)?.delete(listener);
+      };
+    }
+
+    if (this.items.has(cleanUrl)) {
+      listener(this.items.get(cleanUrl)!);
+    } else {
+      const item: PollinationsQueueItem = {
+        id: cleanUrl,
+        url: cleanUrl,
+        addedAt: Date.now(),
+        status: 'waiting',
+        queuePosition: this.queue.length + 1,
+        secondsRemaining: this.calculateEstimatedWait(this.queue.length)
+      };
+      this.items.set(cleanUrl, item);
+      this.queue.push(cleanUrl);
+      this.broadcast(cleanUrl);
+      this.startProcessor();
+    }
+
+    return () => {
+      this.listeners.get(cleanUrl)?.delete(listener);
+    };
+  }
+
+  public retry(url: string) {
+    const cleanUrl = url.trim();
+    this.items.delete(cleanUrl);
+    this.blobCache.delete(cleanUrl);
+    this.queue = this.queue.filter(u => u !== cleanUrl);
+
+    const item: PollinationsQueueItem = {
+      id: cleanUrl,
+      url: cleanUrl,
+      addedAt: Date.now(),
+      status: 'waiting',
+      queuePosition: this.queue.length + 1,
+      secondsRemaining: this.calculateEstimatedWait(this.queue.length)
+    };
+    this.items.set(cleanUrl, item);
+    this.queue.push(cleanUrl);
+    this.broadcast(cleanUrl);
+    this.startProcessor();
+  }
+
+  private calculateEstimatedWait(positionIndex: number): number {
+    const now = Date.now();
+    const timeSinceLast = Math.max(0, now - this.lastRequestTime);
+    const delayForFirst = this.lastRequestTime === 0 ? 0 : Math.max(0, Math.ceil((this.INTERVAL_MS - timeSinceLast) / 1000));
+    return delayForFirst + (positionIndex * 60);
+  }
+
+  private broadcast(url: string) {
+    const item = this.items.get(url);
+    if (!item) return;
+    const subs = this.listeners.get(url);
+    if (subs) {
+      subs.forEach(fn => fn({ ...item }));
+    }
+  }
+
+  private updateCountdowns() {
+    const now = Date.now();
+    const timeSinceLast = Math.max(0, now - this.lastRequestTime);
+    const firstRemainingSec = this.lastRequestTime === 0 ? 0 : Math.max(0, Math.ceil((this.INTERVAL_MS - timeSinceLast) / 1000));
+
+    this.queue.forEach((url, idx) => {
+      const item = this.items.get(url);
+      if (item && item.status === 'waiting') {
+        item.queuePosition = idx + 1;
+        item.secondsRemaining = firstRemainingSec + (idx * 60);
+        this.broadcast(url);
+      }
+    });
+  }
+
+  private async startProcessor() {
+    if (this.isProcessing) return;
+    this.isProcessing = true;
+
+    if (!this.intervalTimer) {
+      this.intervalTimer = setInterval(() => {
+        this.updateCountdowns();
+      }, 1000);
+    }
+
+    while (this.queue.length > 0) {
+      const currentUrl = this.queue[0];
+      const item = this.items.get(currentUrl);
+
+      if (!item) {
+        this.queue.shift();
+        continue;
+      }
+
+      // Tunggu jeda 1 menit (60 detik) jika request sebelumnya baru saja dilakukan
+      const now = Date.now();
+      const timeSinceLast = now - this.lastRequestTime;
+      if (this.lastRequestTime > 0 && timeSinceLast < this.INTERVAL_MS) {
+        const waitMs = this.INTERVAL_MS - timeSinceLast;
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+      }
+
+      item.status = 'loading';
+      item.secondsRemaining = 0;
+      this.broadcast(currentUrl);
+      this.lastRequestTime = Date.now();
+
+      try {
+        let loadedUrl = currentUrl;
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 60000);
+          const res = await fetch(currentUrl, { signal: controller.signal });
+          clearTimeout(timeout);
+          if (res.ok) {
+            const blob = await res.blob();
+            loadedUrl = URL.createObjectURL(blob);
+          } else {
+            throw new Error(`HTTP ${res.status}`);
+          }
+        } catch {
+          // Fallback: pastikan gambar ter-cache via browser Image element
+          await new Promise<void>((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error('Gagal memuat gambar'));
+            img.src = currentUrl;
+          });
+          loadedUrl = currentUrl;
+        }
+
+        this.blobCache.set(currentUrl, loadedUrl);
+        item.status = 'completed';
+        item.blobUrl = loadedUrl;
+        this.broadcast(currentUrl);
+      } catch (err: any) {
+        console.warn(`[PollinationsQueue] Gagal memuat ${currentUrl}:`, err);
+        item.status = 'error';
+        item.error = err.message || 'Gagal memuat gambar';
+        this.broadcast(currentUrl);
+      }
+
+      this.queue.shift();
+      this.updateCountdowns();
+    }
+
+    if (this.intervalTimer) {
+      clearInterval(this.intervalTimer);
+      this.intervalTimer = null;
+    }
+    this.isProcessing = false;
+  }
+
+  public getCachedBlobUrl(url: string): string | undefined {
+    return this.blobCache.get(url);
+  }
+}
+
+export const pollinationsQueue = new PollinationsQueue();
+
+const PollinationsImageLoader = ({ src, alt, ...props }: any) => {
+  const [itemState, setItemState] = useState<PollinationsQueueItem | null>(null);
+  const [manualRetryKey, setManualRetryKey] = useState(0);
+
+  useEffect(() => {
+    if (!src) return;
+    const unsubscribe = pollinationsQueue.register(src, (updated) => {
+      setItemState({ ...updated });
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [src, manualRetryKey]);
+
+  if (!itemState) {
+    return (
+      <div className="my-2 p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs flex items-center gap-2 text-slate-500">
+        <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
+        <span>Menyiapkan pemuatan gambar...</span>
+      </div>
+    );
+  }
+
+  if (itemState.status === 'completed' && itemState.blobUrl) {
+    return (
+      <div className="my-2.5 relative inline-block max-w-full">
+        <img
+          src={itemState.blobUrl}
+          alt={alt || 'Visual Soal (Pollinations.ai)'}
+          className="max-w-full h-auto rounded-xl bg-white shadow-sm border border-slate-200 block"
+          loading="eager"
+          {...props}
+        />
+        <div className="mt-1 flex items-center justify-between text-[10px] text-slate-400">
+          <span className="flex items-center gap-1">
+            <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+            Gambar berhasil dimuat (Pollinations.ai)
+          </span>
+          {src && (
+            <a
+              href={src}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-slate-500 hover:text-indigo-600 hover:underline flex items-center gap-0.5"
+            >
+              URL Asli <ExternalLink className="w-2.5 h-2.5" />
+            </a>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (itemState.status === 'error') {
+    return (
+      <div className="my-2.5 p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 max-w-lg shadow-sm">
+        <div className="flex items-center justify-between gap-2 flex-wrap mb-1.5">
+          <span className="font-semibold flex items-center gap-1.5 text-rose-900">
+            <ImageIcon className="w-4 h-4 text-rose-600 shrink-0" />
+            {alt || 'Gambar Soal (Pollinations.ai)'}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                pollinationsQueue.retry(src);
+                setManualRetryKey(k => k + 1);
+              }}
+              className="text-[11px] text-indigo-700 hover:text-indigo-900 font-semibold underline cursor-pointer"
+            >
+              Coba Antrekan Ulang
+            </button>
+            {src && (
+              <a
+                href={src}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-indigo-600 hover:text-indigo-800 font-medium inline-flex items-center gap-1 underline text-xs"
+              >
+                Buka di Tab Baru <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
+          </div>
+        </div>
+        <p className="text-[11px] text-rose-700">
+          Gagal me-render gambar dari Pollinations.ai ({itemState.error || 'Server sibuk'}). Klik "Coba Antrekan Ulang" atau buka langsung di tab baru.
+        </p>
+      </div>
+    );
+  }
+
+  if (itemState.status === 'loading') {
+    return (
+      <div className="my-3 p-4 bg-indigo-50/70 border border-indigo-200 rounded-xl text-xs max-w-lg shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-indigo-600 rounded-lg text-white">
+            <Loader2 className="w-5 h-5 animate-spin" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-indigo-950 text-sm">Me-render Gambar AI...</span>
+              <span className="text-[10px] bg-indigo-200 text-indigo-800 font-bold px-2 py-0.5 rounded-full">
+                Sedang Proses
+              </span>
+            </div>
+            <p className="text-[11px] text-indigo-800/80 mt-0.5">
+              Mengambil hasil gambar dari server Pollinations.ai...
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const waitSec = Math.max(0, itemState.secondsRemaining);
+  const queuePos = itemState.queuePosition || 1;
+  const progressPercent = Math.min(100, Math.max(5, 100 - (waitSec / ((queuePos * 60) || 60) * 100)));
+  const waitFormatted = waitSec >= 60 
+    ? `${Math.floor(waitSec / 60)} mnt ${waitSec % 60 > 0 ? (waitSec % 60) + ' dtk' : ''}`.trim()
+    : `${waitSec} detik`;
+
+  return (
+    <div className="my-3 p-4 bg-slate-50 border border-slate-200 rounded-xl text-xs max-w-lg shadow-sm">
+      <div className="flex items-start gap-3">
+        <div className="p-2 bg-slate-200 text-slate-700 rounded-lg shrink-0 mt-0.5">
+          <Clock className="w-5 h-5" />
+        </div>
+        <div className="flex-1">
+          <div className="flex items-center justify-between mb-1">
+            <span className="font-bold text-slate-800 text-sm">Menunggu Antrean Gambar</span>
+            <span className="text-[11px] font-mono font-bold bg-amber-100 text-amber-900 border border-amber-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+              <span>{waitFormatted}</span>
+            </span>
+          </div>
+
+          <p className="text-[11px] text-slate-600 mb-2.5">
+            Antrean ke-<strong>{queuePos}</strong> • Jeda antrean 1 menit per gambar agar terhindar dari pemblokiran kuota Pollinations.ai (Error 429).
+          </p>
+
+          <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden mb-2">
+            <div
+              className="bg-indigo-600 h-full transition-all duration-1000 ease-linear rounded-full"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1 border-t border-slate-200/60">
+            <span>Gambar akan dimuat otomatis saat giliran tiba</span>
+            {src && (
+              <a
+                href={src}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-indigo-600 hover:text-indigo-800 font-medium inline-flex items-center gap-1 hover:underline"
+              >
+                Buka Langsung <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const MarkdownImage = ({ src, alt, ...props }: any) => {
+  if (isPollinationsUrl(src)) {
+    return <PollinationsImageLoader src={src} alt={alt} {...props} />;
+  }
+
   const [hasError, setHasError] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [retryKey, setRetryKey] = useState(0);
@@ -763,7 +1146,7 @@ export const AI_PROVIDERS: AIProviderConfig[] = [
   {
     id: 'gemini',
     name: 'Google Gemini',
-    tagline: 'Gratis kuota harian besar, cepat & mutakhir',
+    tagline: '',
     defaultBaseUrl: 'https://generativelanguage.googleapis.com',
     keyPlaceholder: 'AIzaSy...',
     keyUrl: 'https://aistudio.google.com/app/apikey',
@@ -772,48 +1155,48 @@ export const AI_PROVIDERS: AIProviderConfig[] = [
     fastModel: 'gemini-2.0-flash',
     reasoningModel: 'gemini-2.5-pro',
     models: [
-      { id: 'gemini-2.0-flash', name: 'Gemini 2 Flash', desc: 'Next-Gen Cepat & Sangat Stabil' },
-      { id: 'gemini-2.0-flash-lite', name: 'Gemini 2 Flash Lite', desc: 'Ringan, Cepat & Hemat Kuota' },
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', desc: 'Sangat Cepat & Cerdas (Rekomendasi Utama)' },
-      { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', desc: 'Versi Ringan Efisien' },
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', desc: 'Penalaran Tingkat Tinggi / Soal HOTS' },
-      { id: 'gemini-3-flash', name: 'Gemini 3 Flash', desc: 'Generasi Gemini 3 Cepat' },
-      { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', desc: 'Penalaran Lanjut Canggih' },
-      { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', desc: 'Model Ringan Cepat Generasi 3.1' },
-      { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash', desc: 'Model Kecepatan Tinggi Generasi 3.6' },
-      { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', desc: 'Model Ringan Generasi 3.5' },
-      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', desc: 'Performa Cerdas Mutakhir 3.8' },
-      { id: 'gemini-4-argon', name: 'Gemini 4 Argon', desc: 'Edisi Khusus Argon Generasi 4' },
-      { id: 'gemini-4-carbon', name: 'Gemini 4 Carbon', desc: 'Edisi Khusus Carbon Generasi 4' },
-      { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen', desc: 'Edisi Khusus Hydrogen Generasi 4' },
+      { id: 'gemini-2.0-flash', name: 'Gemini 2 Flash' },
+      { id: 'gemini-2.0-flash-lite', name: 'Gemini 2 Flash Lite' },
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite' },
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+      { id: 'gemini-3-flash', name: 'Gemini 3 Flash' },
+      { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro' },
+      { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite' },
+      { id: 'gemini-3.6-flash', name: 'Gemini 3.6 Flash' },
+      { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite' },
+      { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+      { id: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+      { id: 'gemini-4-carbon', name: 'Gemini 4 Carbon' },
+      { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen' },
     ]
   },
   {
     id: 'groq',
     name: 'Groq Cloud',
-    tagline: 'Inferensi LPU super cepat, gratis & open source',
+    tagline: '',
     defaultBaseUrl: 'https://api.groq.com/openai/v1',
     keyPlaceholder: 'gsk_...',
     keyUrl: 'https://console.groq.com/keys',
-    keyUrlLabel: 'Groq Console (Gratis)',
+    keyUrlLabel: 'Groq Console',
     defaultModel: 'openai/gpt-oss-120b',
     fastModel: 'openai/gpt-oss-20b',
     reasoningModel: 'deepseek-r1-distill-llama-70b',
     models: [
-      { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B Instant', desc: 'Paling Stabil & Super Cepat (~800 tok/detik, Akses Gratis Semua Akun - Rekomendasi)' },
-      { id: 'openai/gpt-oss-120b', name: 'OpenAI GPT-OSS 120B', desc: 'Model Flagship penalaran tinggi di Groq' },
-      { id: 'openai/gpt-oss-20b', name: 'OpenAI GPT-OSS 20B', desc: 'Model ringkas & cepat di Groq' },
-      { id: 'qwen/qwen3.8-27b', name: 'Qwen 3.8 27B', desc: 'Model multimodal canggih di Groq' },
-      { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile', desc: 'Model 70B (Memerlukan tier/akses khusus di Groq)' },
-      { id: 'deepseek-r1-distill-llama-70b', name: 'DeepSeek R1 Distill 70B', desc: 'Penalaran mendalam untuk soal Matematika & Sains' },
-      { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B', desc: 'Konteks panjang 32k token' },
-      { id: 'gemma2-9b-it', name: 'Google Gemma 2 9B', desc: 'Model Google open source di Groq' },
+      { id: 'llama-3.1-8b-instant', name: 'Llama 3.1 8B Instant' },
+      { id: 'openai/gpt-oss-120b', name: 'OpenAI GPT-OSS 120B' },
+      { id: 'openai/gpt-oss-20b', name: 'OpenAI GPT-OSS 20B' },
+      { id: 'qwen/qwen3.8-27b', name: 'Qwen 3.8 27B' },
+      { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile' },
+      { id: 'deepseek-r1-distill-llama-70b', name: 'DeepSeek R1 Distill 70B' },
+      { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B' },
+      { id: 'gemma2-9b-it', name: 'Google Gemma 2 9B' },
     ]
   },
   {
     id: 'deepseek',
     name: 'DeepSeek',
-    tagline: 'Juara penalaran logika, matematika & tarif super hemat',
+    tagline: '',
     defaultBaseUrl: 'https://api.deepseek.com',
     keyPlaceholder: 'sk-...',
     keyUrl: 'https://platform.deepseek.com/api_keys',
@@ -822,14 +1205,14 @@ export const AI_PROVIDERS: AIProviderConfig[] = [
     fastModel: 'deepseek-chat',
     reasoningModel: 'deepseek-reasoner',
     models: [
-      { id: 'deepseek-chat', name: 'DeepSeek-V3 (Chat)', desc: 'Penalaran tinggi & tarif sangat terjangkau (Rekomendasi)' },
-      { id: 'deepseek-reasoner', name: 'DeepSeek-R1 (Reasoning)', desc: 'Penalaran bertahap (Chain-of-Thought) untuk soal sulit' },
+      { id: 'deepseek-chat', name: 'DeepSeek-V3 (Chat)' },
+      { id: 'deepseek-reasoner', name: 'DeepSeek-R1 (Reasoning)' },
     ]
   },
   {
     id: 'openai',
     name: 'OpenAI',
-    tagline: 'Pionir model GPT-4o & GPT-4o-mini',
+    tagline: '',
     defaultBaseUrl: 'https://api.openai.com/v1',
     keyPlaceholder: 'sk-proj-...',
     keyUrl: 'https://platform.openai.com/api-keys',
@@ -838,16 +1221,16 @@ export const AI_PROVIDERS: AIProviderConfig[] = [
     fastModel: 'gpt-4o-mini',
     reasoningModel: 'o3-mini',
     models: [
-      { id: 'gpt-4o-mini', name: 'GPT-4o Mini', desc: 'Cepat, cerdas & sangat hemat biaya (Rekomendasi)' },
-      { id: 'gpt-4o', name: 'GPT-4o Flagship', desc: 'Model flagship multimodal tercanggih dari OpenAI' },
-      { id: 'o3-mini', name: 'o3-mini', desc: 'Model penalaran penalaran STEM & hitungan' },
-      { id: 'gpt-4-turbo', name: 'GPT-4 Turbo', desc: 'Versi turbo klasik' },
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
+      { id: 'gpt-4o', name: 'GPT-4o Flagship' },
+      { id: 'o3-mini', name: 'o3-mini' },
+      { id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
     ]
   },
   {
     id: 'openrouter',
     name: 'OpenRouter',
-    tagline: '1 API Key untuk 200+ model: Claude, Llama, Mistral, dll.',
+    tagline: '',
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
     keyPlaceholder: 'sk-or-v1-...',
     keyUrl: 'https://openrouter.ai/keys',
@@ -856,17 +1239,17 @@ export const AI_PROVIDERS: AIProviderConfig[] = [
     fastModel: 'google/gemini-2.0-flash-001',
     reasoningModel: 'deepseek/deepseek-r1',
     models: [
-      { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Meta Llama 3.3 70B', desc: 'Open source terbaik via OpenRouter' },
-      { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1 (Full)', desc: 'Model penalaran 671B parameter' },
-      { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', desc: 'Bahasa Indonesia & sastra sangat alami' },
-      { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', desc: 'Kecerdasan tertinggi dari Anthropic' },
-      { id: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash (OpenRouter)', desc: 'Akses Gemini tanpa akun Google Cloud' },
+      { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Meta Llama 3.3 70B' },
+      { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1 (Full)' },
+      { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku' },
+      { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet' },
+      { id: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash (OpenRouter)' },
     ]
   },
   {
     id: '9router',
     name: '9router',
-    tagline: 'Gateway AI mandiri & proxy multi-provider (40+ LLM)',
+    tagline: '',
     defaultBaseUrl: 'http://localhost:20128/v1',
     keyPlaceholder: 'API Key (opsional / jika diproteksi token)',
     keyUrl: 'http://localhost:20128',
@@ -875,22 +1258,22 @@ export const AI_PROVIDERS: AIProviderConfig[] = [
     fastModel: 'gemini-2.0-flash',
     reasoningModel: 'claude-3-7-sonnet',
     models: [
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', desc: 'Rute via 9router' },
-      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', desc: 'Rute via 9router' },
-      { id: 'claude-3-7-sonnet', name: 'Claude 3.7 Sonnet', desc: 'Rute via 9router' },
-      { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', desc: 'Rute via 9router' },
-      { id: 'deepseek-chat', name: 'DeepSeek V3', desc: 'Rute via 9router' },
-      { id: 'deepseek-reasoner', name: 'DeepSeek R1', desc: 'Rute via 9router' },
-      { id: 'gpt-4o-mini', name: 'GPT-4o Mini', desc: 'Rute via 9router' },
-      { id: 'gpt-4o', name: 'GPT-4o Flagship', desc: 'Rute via 9router' },
-      { id: 'qwen-2.5-72b', name: 'Qwen 2.5 72B', desc: 'Rute via 9router' },
-      { id: 'llama-3.3-70b', name: 'Llama 3.3 70B', desc: 'Rute via 9router' }
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' },
+      { id: 'claude-3-7-sonnet', name: 'Claude 3.7 Sonnet' },
+      { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet' },
+      { id: 'deepseek-chat', name: 'DeepSeek V3' },
+      { id: 'deepseek-reasoner', name: 'DeepSeek R1' },
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
+      { id: 'gpt-4o', name: 'GPT-4o Flagship' },
+      { id: 'qwen-2.5-72b', name: 'Qwen 2.5 72B' },
+      { id: 'llama-3.3-70b', name: 'Llama 3.3 70B' }
     ]
   },
   {
     id: 'custom',
     name: 'Custom (Ollama / Local LLM / Lainnya)',
-    tagline: 'Gunakan server lokal Ollama, LM Studio, vLLM, atau proxy Anda',
+    tagline: '',
     defaultBaseUrl: 'http://localhost:11434/v1',
     keyPlaceholder: 'API Key (kosongkan jika Ollama lokal)',
     keyUrl: 'https://ollama.com',
@@ -899,11 +1282,11 @@ export const AI_PROVIDERS: AIProviderConfig[] = [
     fastModel: 'llama3.2',
     reasoningModel: 'deepseek-r1',
     models: [
-      { id: 'llama3.2', name: 'Llama 3.2', desc: 'Model lokal ringan Ollama' },
-      { id: 'llama3.3', name: 'Llama 3.3', desc: 'Model lokal 70B Ollama' },
-      { id: 'deepseek-r1', name: 'DeepSeek R1 Lokal', desc: 'Ollama deepseek-r1' },
-      { id: 'qwen2.5', name: 'Qwen 2.5', desc: 'Model multilingual kuat' },
-      { id: 'mistral', name: 'Mistral 7B', desc: 'Model open source klasik' },
+      { id: 'llama3.2', name: 'Llama 3.2' },
+      { id: 'llama3.3', name: 'Llama 3.3' },
+      { id: 'deepseek-r1', name: 'DeepSeek R1 Lokal' },
+      { id: 'qwen2.5', name: 'Qwen 2.5' },
+      { id: 'mistral', name: 'Mistral 7B' },
     ]
   }
 ];
@@ -2124,7 +2507,7 @@ ${payload.uniformLength ? `\n- WAJIB Keseragaman Panjang Pilihan: Pastikan semua
 ${payload.studentMisconception ? `\n- WAJIB Gunakan Miskonsepsi Siswa: Untuk pilihan jawaban salah (pengecoh/distractor), rancang sedemikian rupa agar jawaban tersebut merepresentasikan miskonsepsi umum atau kesalahan hitung/analisa yang biasa dilakukan oleh siswa (jawaban masuk akal/plausible).` : ''}
 ${payload.noExtraExplanation ? `\n- DILARANG Memberi Penjelasan Ekstra: Pada pilihan jawaban, berikan HANYA poin jawaban inti saja tanpa menambahkan alasan, argumen, kata "karena", atau teks penjelasan tambahan apa pun di dalam opsi jawaban.` : ''}
 ${payload.supportEquation ? `\n- WAJIB sertakan soal yang mengandung RUMUS (Equation) matematika/fisika/kimia atau logika analitik menggunakan sintaks LaTeX (blok \`$$\` atau inline \`$\`).` : '\n- DILARANG menggunakan RUMUS (Equation) atau format LaTeX dalam bentuk apapun pada soal dan jawaban.'}
-${payload.supportImage ? `\n- WAJIB sertakan GAMBAR ilustrasi pada soal (minimal di beberapa soal). Gunakan format markdown: \`![deskripsi](https://image.pollinations.ai/prompt/detailed-description-of-image-in-english?width=400&height=300&nologo=true)\` di dalam teks Soal. Ganti \`detailed-description-of-image-in-english\` dengan deskripsi spesifik tentang apa yang diilustrasikan di soal (WAJIB bahasa Inggris, pisahkan kata dengan tanda penghubung "-", BUKAN SPASI). Contoh: \`https://image.pollinations.ai/prompt/a-green-leaf-showing-photosynthesis-process?width=400&height=300&nologo=true\`.` : '\n- DILARANG menyertakan GAMBAR/ilustrasi markdown dalam bentuk apapun pada soal dan jawaban.'}
+${payload.supportImage ? `\n- WAJIB sertakan GAMBAR ilustrasi pada soal (cukup 1 sampai 2 gambar per paket soal agar antrean render efisien). Gunakan format markdown: \`![deskripsi](https://image.pollinations.ai/prompt/detailed-description-of-image-in-english?width=400&height=300&nologo=true)\` di dalam teks Soal. Ganti \`detailed-description-of-image-in-english\` dengan deskripsi spesifik tentang apa yang diilustrasikan di soal (WAJIB bahasa Inggris, pisahkan kata dengan tanda penghubung "-", BUKAN SPASI). Contoh: \`https://image.pollinations.ai/prompt/a-green-leaf-showing-photosynthesis-process?width=400&height=300&nologo=true\`.` : '\n- DILARANG menyertakan GAMBAR/ilustrasi markdown dalam bentuk apapun pada soal dan jawaban.'}
 ${payload.supportGraph ? `\n- WAJIB buatkan satu atau beberapa soal yang memerlukan analisis GRAFIK. Gunakan markdown image QuickChart.io yang valid: \`![Grafik](https://quickchart.io/chart?bkg=white&w=500&h=300&c={"type":"bar","data":{"labels":["A","B"],"datasets":[{"label":"Nilai","data":[10,20]}]}})\`. PENTING: Pada teks label/judul chart, DILARANG memakai tanda kurung '(' atau ')' (tulis 'dalam Mbps' atau 'Mbps', JANGAN gunakan '(Mbps)'). Jangan gunakan spasi berlebihan dalam URL.` : '\n- DILARANG membuat soal yang menggunakan atau memerlukan analisis GRAFIK atau chart.'}
 ${payload.supportDiagram ? `\n- WAJIB buatkan satu atau beberapa soal yang memerlukan pemahaman DIAGRAM PROSES/SIKLUS (misalnya siklus air, fotosintesis, rantai makanan, daur biogeokimia, proses pembelahan sel, bagan alur). Tulis diagram menggunakan blok kode \`\`\`mermaid\ngraph TD\n  A --> B\n\`\`\` ATAU markdown \`![Diagram](https://mermaid.ink/img/{BASE64})\`. Diagram harus sederhana dan mudah dipahami.` : '\n- DILARANG membuat soal yang menggunakan DIAGRAM PROSES/SIKLUS berbasis Mermaid.'}
 ${payload.additionalInstructions ? `\nInstruksi Khusus Tambahan: ${payload.additionalInstructions}` : ''}
@@ -2689,7 +3072,9 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
 
       await Promise.all(imageUrls.map(async (img) => {
         try {
-          const response = await fetch(img.url);
+          const cachedBlobUrl = isPollinationsUrl(img.url) ? pollinationsQueue.getCachedBlobUrl(img.url) : undefined;
+          const fetchTarget = cachedBlobUrl || img.url;
+          const response = await fetch(fetchTarget);
           const blob = await response.blob();
           zip.file(img.name, blob);
         } catch (e) {
@@ -3689,24 +4074,20 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
                   {AI_PROVIDERS.map((prov) => {
                     const isSelected = aiProvider === prov.id;
+                    const displayName = prov.name.split(' (')[0];
                     return (
                       <button
                         key={prov.id}
                         type="button"
                         onClick={() => handleSelectProvider(prov.id)}
-                        className={`text-left p-3 rounded-xl border transition-all flex flex-col justify-between relative cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 ${isSelected
-                            ? 'border-indigo-600 bg-indigo-50/70 shadow-xs ring-2 ring-indigo-500/20'
-                            : 'border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50'
+                        className={`text-center py-3 px-3 rounded-xl border transition-all flex items-center justify-center cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 ${isSelected
+                            ? 'border-indigo-600 bg-indigo-50/80 shadow-xs ring-2 ring-indigo-500/20 text-indigo-900 font-bold'
+                            : 'border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-medium'
                           }`}
                       >
-                        <div className="mb-1 w-full">
-                          <span className={`text-xs font-bold leading-tight ${isSelected ? 'text-indigo-900' : 'text-slate-800'}`}>
-                            {prov.name.split(' (')[0]}
-                          </span>
-                        </div>
-                        <p className={`text-[11px] leading-snug line-clamp-2 ${isSelected ? 'text-indigo-700/90 font-medium' : 'text-slate-500'}`}>
-                          {prov.tagline}
-                        </p>
+                        <span className="text-xs sm:text-sm font-semibold truncate">
+                          {displayName}
+                        </span>
                       </button>
                     );
                   })}
@@ -3714,13 +4095,13 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
               </div>
 
               {/* Provider Info Banner */}
-              <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 flex items-start gap-2.5">
-                <div className="p-1 text-indigo-600 mt-0.5">
+              <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/80 flex items-center gap-2.5">
+                <div className="p-1 text-indigo-600">
                   <Bot className="w-4 h-4 shrink-0 text-indigo-600" />
                 </div>
                 <div className="text-xs">
-                  <span className="font-bold text-slate-800">{activeProviderConfig.name}: </span>
-                  <span className="text-slate-600">{activeProviderConfig.tagline}.</span>
+                  <span className="text-slate-500 font-medium">Provider aktif: </span>
+                  <strong className="text-slate-800">{activeProviderConfig.name}</strong>
                 </div>
               </div>
 
