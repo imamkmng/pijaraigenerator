@@ -1916,18 +1916,22 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         const list: QuestionData[] = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.questions) ? parsed.questions : []);
-        return list.map((q: QuestionData) => ({
-          ...q,
-          Soal: preprocessMarkdown(q.Soal),
-          Isi_Referensi: cleanStimulusText(preprocessMarkdown(q.Isi_Referensi)),
-          Pilihan_A: preprocessMarkdown(q.Pilihan_A),
-          Pilihan_B: preprocessMarkdown(q.Pilihan_B),
-          Pilihan_C: preprocessMarkdown(q.Pilihan_C),
-          Pilihan_D: preprocessMarkdown(q.Pilihan_D),
-          Pilihan_E: preprocessMarkdown(q.Pilihan_E),
-          Pilihan_F: preprocessMarkdown(q.Pilihan_F),
-          Jawaban_Essay: preprocessMarkdown(q.Jawaban_Essay)
-        }));
+        return list.map((q: QuestionData) => {
+          const isEssay = q.Jenis_Soal === 'ESSAY' || q.Jenis_Soal === 'PILIHAN ESSAY';
+          return {
+            ...q,
+            Soal: preprocessMarkdown(q.Soal),
+            Isi_Referensi: cleanStimulusText(preprocessMarkdown(q.Isi_Referensi)),
+            Pilihan_A: isEssay ? undefined : (q.Pilihan_A ? preprocessMarkdown(q.Pilihan_A) : undefined),
+            Pilihan_B: isEssay ? undefined : (q.Pilihan_B ? preprocessMarkdown(q.Pilihan_B) : undefined),
+            Pilihan_C: isEssay ? undefined : (q.Pilihan_C ? preprocessMarkdown(q.Pilihan_C) : undefined),
+            Pilihan_D: isEssay ? undefined : (q.Pilihan_D ? preprocessMarkdown(q.Pilihan_D) : undefined),
+            Pilihan_E: isEssay ? undefined : (q.Pilihan_E ? preprocessMarkdown(q.Pilihan_E) : undefined),
+            Pilihan_F: isEssay ? undefined : (q.Pilihan_F ? preprocessMarkdown(q.Pilihan_F) : undefined),
+            Kunci_Jawaban_Non_Essay: isEssay ? '' : (q.Kunci_Jawaban_Non_Essay || ''),
+            Jawaban_Essay: isEssay ? preprocessMarkdown(q.Jawaban_Essay) : ''
+          };
+        });
       }
     } catch (e) {
       console.warn('Gagal membaca saved questions:', e);
@@ -2161,6 +2165,8 @@ export default function App() {
 
     const essay = raw.Jawaban_Essay ?? raw.jawaban_essay ?? raw.jawabanEssay ?? raw.pedoman_essay ?? raw.kunci_essay ?? raw.rubrik ?? '';
 
+    const isEssayType = jenis === 'ESSAY' || jenis === 'PILIHAN ESSAY';
+
     return {
       Nomor: nomor,
       Jenis_Soal: jenis,
@@ -2170,14 +2176,14 @@ export default function App() {
       Isi_Referensi: cleanIsiRef,
       Soal: cleanSoalResult || effectiveSoal || String(soal),
       File_Audio_Video: '',
-      Pilihan_A: optA !== '' ? cleanOption(optA) : undefined,
-      Pilihan_B: optB !== '' ? cleanOption(optB) : undefined,
-      Pilihan_C: optC !== '' ? cleanOption(optC) : undefined,
-      Pilihan_D: optD !== '' ? cleanOption(optD) : undefined,
-      Pilihan_E: optE !== '' ? cleanOption(optE) : undefined,
-      Pilihan_F: optF !== '' ? cleanOption(optF) : undefined,
-      Kunci_Jawaban_Non_Essay: cleanKunci,
-      Jawaban_Essay: String(essay)
+      Pilihan_A: !isEssayType && optA !== '' ? cleanOption(optA) : undefined,
+      Pilihan_B: !isEssayType && optB !== '' ? cleanOption(optB) : undefined,
+      Pilihan_C: !isEssayType && optC !== '' ? cleanOption(optC) : undefined,
+      Pilihan_D: !isEssayType && optD !== '' ? cleanOption(optD) : undefined,
+      Pilihan_E: !isEssayType && optE !== '' ? cleanOption(optE) : undefined,
+      Pilihan_F: !isEssayType && optF !== '' ? cleanOption(optF) : undefined,
+      Kunci_Jawaban_Non_Essay: isEssayType ? '' : cleanKunci,
+      Jawaban_Essay: isEssayType ? String(essay) : ''
     };
   };
 
@@ -2684,6 +2690,9 @@ Tugas Anda adalah membuat bank soal ujian CBT berkualitas tinggi, mendalam, dan 
         : `* Semua butir soal menggunakan jenis: ${typesStr}.`}
   * Jika ada Pilihan Ganda Kompleks (PGK): Soal memiliki lebih dari 1 pilihan benar (misal 2 atau 3 jawaban benar), kunci pada Kunci_Jawaban_Non_Essay wajib berupa huruf pilihan dipisahkan koma tanpa spasi (contoh: "A,C" atau "B,D,E").
   * Jika ada Essay: Buat pertanyaan uraian analitis dan berikan pedoman penskoran serta kunci lengkap pada Jawaban_Essay.
+  * ATURAN MUTLAK JAWABAN ESSAY VS PG (FORMAT PIJAR CBT):
+    - Untuk jenis soal "PG" (Pilihan Ganda), "PGK", dan "MENGURUTKAN": Field Jawaban_Essay WAJIB BERUPA STRING KOSONG ("")! DILARANG KERAS mengisi pembahasan atau teks apapun di Jawaban_Essay pada soal PG/PGK karena format Pijar CBT melarang soal PG memiliki jawaban essay.
+    - Field Jawaban_Essay HANYA diisi untuk jenis soal "ESSAY" atau "PILIHAN ESSAY".
 
 === STANDAR KUALITAS PEDAGOGIS & AKURASI KONTEN ===
 1. Pemisahan Tegas Isi_Referensi (Stimulus) vs Soal vs Pilihan Jawaban (MUTLAK):
@@ -2707,8 +2716,8 @@ Tugas Anda adalah membuat bank soal ujian CBT berkualitas tinggi, mendalam, dan 
    - Hindari opsi klise seperti "Semua jawaban benar" atau "Tidak ada pilihan yang tepat".
 
 3. Konsistensi & Akurasi Mutlak Kunci Jawaban:
-   - Huruf pada Kunci_Jawaban_Non_Essay (misal: "B") WAJIB 100% selaras dengan opsi Pilihan_B.
-   - Pembahasan pada Jawaban_Essay WAJIB menjelaskan secara runtut mengapa opsi tersebut benar dan mengapa pengecoh lainnya kurang tepat. Dilarang bertolak belakang antara kunci dan pembahasan!
+   - Untuk soal PG, PGK, dan MENGURUTKAN: Huruf pada Kunci_Jawaban_Non_Essay (misal: "B" atau "A,C") WAJIB 100% selaras dengan opsi jawaban, dan field Jawaban_Essay WAJIB string kosong (""). Dilarang mengisi jawaban essay pada soal PG!
+   - Untuk soal ESSAY dan PILIHAN ESSAY: Kunci_Jawaban_Non_Essay WAJIB string kosong (""), dan Jawaban_Essay WAJIB berisi kunci/pedoman penskoran essay lengkap.
 
 4. Format Rumus & Simbol (LaTeX):
    - Jika terdapat rumus matematika, fisika, kimia, atau persamaan angka pecahan/akar/pangkat, gunakan sintaks LaTeX standar ($...$ untuk inline math dan $$...$$ untuk block math).
@@ -2740,8 +2749,8 @@ Format setiap objek soal dalam array:
 - Pilihan_D: Konten murni opsi D (tanpa label "D.")
 - Pilihan_E: Konten murni opsi E (kosongkan "" jika s/d D)
 - Pilihan_F: ""
-- Kunci_Jawaban_Non_Essay: Huruf kunci (misal "A", atau "A,C" jika PGK)
-- Jawaban_Essay: Pembahasan dan rubrik lengkap`;
+- Kunci_Jawaban_Non_Essay: Huruf kunci (misal "A", atau "A,C" jika PGK). WAJIB string kosong ("") jika jenis soal ESSAY.
+- Jawaban_Essay: Pedoman/kunci essay KHUSUS untuk jenis soal ESSAY atau PILIHAN ESSAY. Untuk soal PG, PGK, dan MENGURUTKAN, field ini WAJIB string kosong ("")!`;
   };
 
   // Direct client-side generation fallback if serverless functions are not deployed
@@ -3256,18 +3265,19 @@ Format setiap objek soal dalam array:
       }));
 
       const fixedQuestions = consolidatedQuestions.map((q: QuestionData) => {
+        const isEssay = q.Jenis_Soal === 'ESSAY' || q.Jenis_Soal === 'PILIHAN ESSAY';
         return {
           ...q,
           Soal: preprocessMarkdown(q.Soal),
           Isi_Referensi: cleanStimulusText(preprocessMarkdown(q.Isi_Referensi)),
-          Pilihan_A: preprocessMarkdown(q.Pilihan_A),
-          Pilihan_B: preprocessMarkdown(q.Pilihan_B),
-          Pilihan_C: preprocessMarkdown(q.Pilihan_C),
-          Pilihan_D: preprocessMarkdown(q.Pilihan_D),
-          Pilihan_E: preprocessMarkdown(q.Pilihan_E),
-          Pilihan_F: preprocessMarkdown(q.Pilihan_F),
-          Kunci_Jawaban_Non_Essay: q.Kunci_Jawaban_Non_Essay ? q.Kunci_Jawaban_Non_Essay.replace(/\s+/g, '') : '',
-          Jawaban_Essay: preprocessMarkdown(q.Jawaban_Essay)
+          Pilihan_A: isEssay ? undefined : (q.Pilihan_A ? preprocessMarkdown(q.Pilihan_A) : undefined),
+          Pilihan_B: isEssay ? undefined : (q.Pilihan_B ? preprocessMarkdown(q.Pilihan_B) : undefined),
+          Pilihan_C: isEssay ? undefined : (q.Pilihan_C ? preprocessMarkdown(q.Pilihan_C) : undefined),
+          Pilihan_D: isEssay ? undefined : (q.Pilihan_D ? preprocessMarkdown(q.Pilihan_D) : undefined),
+          Pilihan_E: isEssay ? undefined : (q.Pilihan_E ? preprocessMarkdown(q.Pilihan_E) : undefined),
+          Pilihan_F: isEssay ? undefined : (q.Pilihan_F ? preprocessMarkdown(q.Pilihan_F) : undefined),
+          Kunci_Jawaban_Non_Essay: isEssay ? '' : (q.Kunci_Jawaban_Non_Essay ? q.Kunci_Jawaban_Non_Essay.replace(/\s+/g, '') : ''),
+          Jawaban_Essay: isEssay ? preprocessMarkdown(q.Jawaban_Essay) : ''
         };
       });
       setQuestions(fixedQuestions);
@@ -3343,24 +3353,27 @@ Format setiap objek soal dalam array:
       'Kunci Jawaban Non Essay', 'Jawaban Essay'
     ];
 
-    const dataRows = safeQuestions.map((q, idx) => [
-      idx + 1,
-      q.Jenis_Soal || '',
-      q.Nilai || '',
-      q.Nama_Materi || '',
-      q.Judul_Referensi || '',
-      formatForExcel(q.Isi_Referensi || ''),
-      formatForExcel(q.Soal || ''),
-      q.File_Audio_Video || '',
-      formatForExcel(q.Pilihan_A || ''),
-      formatForExcel(q.Pilihan_B || ''),
-      formatForExcel(q.Pilihan_C || ''),
-      formatForExcel(q.Pilihan_D || ''),
-      formatForExcel(q.Pilihan_E || ''),
-      formatForExcel(q.Pilihan_F || ''),
-      q.Kunci_Jawaban_Non_Essay || '',
-      formatForExcel(q.Jawaban_Essay || '')
-    ]);
+    const dataRows = safeQuestions.map((q, idx) => {
+      const isEssay = q.Jenis_Soal === 'ESSAY' || q.Jenis_Soal === 'PILIHAN ESSAY';
+      return [
+        idx + 1,
+        q.Jenis_Soal || '',
+        q.Nilai || '',
+        q.Nama_Materi || '',
+        q.Judul_Referensi || '',
+        formatForExcel(q.Isi_Referensi || ''),
+        formatForExcel(q.Soal || ''),
+        q.File_Audio_Video || '',
+        isEssay ? '' : formatForExcel(q.Pilihan_A || ''),
+        isEssay ? '' : formatForExcel(q.Pilihan_B || ''),
+        isEssay ? '' : formatForExcel(q.Pilihan_C || ''),
+        isEssay ? '' : formatForExcel(q.Pilihan_D || ''),
+        isEssay ? '' : formatForExcel(q.Pilihan_E || ''),
+        isEssay ? '' : formatForExcel(q.Pilihan_F || ''),
+        isEssay ? '' : (q.Kunci_Jawaban_Non_Essay || ''),
+        isEssay ? formatForExcel(q.Jawaban_Essay || '') : ''
+      ];
+    });
 
     const worksheetData = [headers, ...dataRows];
     const ws = XLSX.utils.aoa_to_sheet(worksheetData);
@@ -3477,17 +3490,19 @@ Format setiap objek soal dalam array:
 
   const handleSaveEdit = () => {
     if (editingQuestion) {
+      const isEssay = editingQuestion.data.Jenis_Soal === 'ESSAY' || editingQuestion.data.Jenis_Soal === 'PILIHAN ESSAY';
       const cleanData: QuestionData = {
         ...editingQuestion.data,
         Soal: preprocessMarkdown(editingQuestion.data.Soal),
-        Isi_Referensi: preprocessMarkdown(editingQuestion.data.Isi_Referensi),
-        Pilihan_A: preprocessMarkdown(editingQuestion.data.Pilihan_A),
-        Pilihan_B: preprocessMarkdown(editingQuestion.data.Pilihan_B),
-        Pilihan_C: preprocessMarkdown(editingQuestion.data.Pilihan_C),
-        Pilihan_D: preprocessMarkdown(editingQuestion.data.Pilihan_D),
-        Pilihan_E: preprocessMarkdown(editingQuestion.data.Pilihan_E),
-        Pilihan_F: preprocessMarkdown(editingQuestion.data.Pilihan_F),
-        Jawaban_Essay: preprocessMarkdown(editingQuestion.data.Jawaban_Essay),
+        Isi_Referensi: cleanStimulusText(preprocessMarkdown(editingQuestion.data.Isi_Referensi)),
+        Pilihan_A: isEssay ? undefined : (editingQuestion.data.Pilihan_A ? preprocessMarkdown(editingQuestion.data.Pilihan_A) : undefined),
+        Pilihan_B: isEssay ? undefined : (editingQuestion.data.Pilihan_B ? preprocessMarkdown(editingQuestion.data.Pilihan_B) : undefined),
+        Pilihan_C: isEssay ? undefined : (editingQuestion.data.Pilihan_C ? preprocessMarkdown(editingQuestion.data.Pilihan_C) : undefined),
+        Pilihan_D: isEssay ? undefined : (editingQuestion.data.Pilihan_D ? preprocessMarkdown(editingQuestion.data.Pilihan_D) : undefined),
+        Pilihan_E: isEssay ? undefined : (editingQuestion.data.Pilihan_E ? preprocessMarkdown(editingQuestion.data.Pilihan_E) : undefined),
+        Pilihan_F: isEssay ? undefined : (editingQuestion.data.Pilihan_F ? preprocessMarkdown(editingQuestion.data.Pilihan_F) : undefined),
+        Kunci_Jawaban_Non_Essay: isEssay ? '' : (editingQuestion.data.Kunci_Jawaban_Non_Essay ? editingQuestion.data.Kunci_Jawaban_Non_Essay.trim().toUpperCase() : ''),
+        Jawaban_Essay: isEssay ? preprocessMarkdown(editingQuestion.data.Jawaban_Essay) : '',
       };
       setQuestions(prev => {
         const newQuestions = [...prev];
@@ -4257,8 +4272,8 @@ Format setiap objek soal dalam array:
                               </div>
                             )}
 
-                            {/* Pedoman Essay */}
-                            {q.Jawaban_Essay && (
+                            {/* Pedoman Essay (Hanya untuk jenis soal ESSAY / PILIHAN ESSAY) */}
+                            {(q.Jenis_Soal === 'ESSAY' || q.Jenis_Soal === 'PILIHAN ESSAY') && q.Jawaban_Essay && (
                               <div className="rounded-xl border border-emerald-200/90 bg-emerald-50/40 p-4">
                                 <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-emerald-800 mb-1.5">
                                   <CheckCircle2 className="w-4 h-4 text-emerald-600" />
@@ -4337,7 +4352,7 @@ Format setiap objek soal dalam array:
                                   </div>
                                 );
                               })}
-                              {q.Jawaban_Essay && (
+                              {(q.Jenis_Soal === 'ESSAY' || q.Jenis_Soal === 'PILIHAN ESSAY') && q.Jawaban_Essay && (
                                 <div className="mt-2 pt-2 border-t border-slate-100 text-slate-600 text-xs">
                                   <span className="font-bold text-emerald-700">Kunci Essay: </span>
                                   <MarkdownText>{q.Jawaban_Essay}</MarkdownText>
@@ -5069,7 +5084,7 @@ Format setiap objek soal dalam array:
                     })}
                   </div>
 
-                  {editingQuestion.data.Jawaban_Essay && (
+                  {(editingQuestion.data.Jenis_Soal === 'ESSAY' || editingQuestion.data.Jenis_Soal === 'PILIHAN ESSAY') && editingQuestion.data.Jawaban_Essay && (
                     <div className="mt-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
                       <span className="text-xs font-bold text-indigo-900 block mb-1">Pedoman / Jawaban Essay:</span>
                       <div className="text-xs text-indigo-950">
@@ -5091,44 +5106,45 @@ Format setiap objek soal dalam array:
                   <p className="text-[11px] text-slate-400 mt-1">Dukung rumus LaTeX ($...$ atau $$...$$), grafik QuickChart, diagram Mermaid, dan gambar.</p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  {(['A', 'B', 'C', 'D', 'E', 'F'] as const).map(opt => {
-                    const key = `Pilihan_${opt}` as keyof QuestionData;
-                    if (editingQuestion.data[key] !== undefined || editingQuestion.data.Jenis_Soal === 'PG' || editingQuestion.data.Jenis_Soal === 'PGK') {
-                      return (
-                        <div key={key}>
-                          <label className="block text-xs font-medium mb-1 text-slate-700">Pilihan {opt}</label>
-                          <textarea
-                            rows={2}
-                            className="w-full border border-slate-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-indigo-500"
-                            value={editingQuestion.data[key] as string || ''}
-                            onChange={e => setEditingQuestion(prev => prev ? { ...prev, data: { ...prev.data, [key]: e.target.value } } : null)}
-                          />
-                        </div>
-                      );
-                    }
-                    return null;
-                  })}
-                </div>
+                {editingQuestion.data.Jenis_Soal !== 'ESSAY' && editingQuestion.data.Jenis_Soal !== 'PILIHAN ESSAY' ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-3">
+                      {(['A', 'B', 'C', 'D', 'E', 'F'] as const).map(opt => {
+                        const key = `Pilihan_${opt}` as keyof QuestionData;
+                        return (
+                          <div key={key}>
+                            <label className="block text-xs font-medium mb-1 text-slate-700">Pilihan {opt}</label>
+                            <textarea
+                              rows={2}
+                              className="w-full border border-slate-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-indigo-500"
+                              value={editingQuestion.data[key] as string || ''}
+                              onChange={e => setEditingQuestion(prev => prev ? { ...prev, data: { ...prev.data, [key]: e.target.value } } : null)}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
 
-                <div>
-                  <label className="block text-sm font-medium mb-1 text-slate-700">Kunci Jawaban Non-Essay (Misal: A atau A,C)</label>
-                  <input
-                    type="text"
-                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-indigo-500"
-                    value={editingQuestion.data.Kunci_Jawaban_Non_Essay || ''}
-                    onChange={e => setEditingQuestion(prev => prev ? { ...prev, data: { ...prev.data, Kunci_Jawaban_Non_Essay: e.target.value } } : null)}
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-1 text-slate-700">Kunci Jawaban Essay (Opsional)</label>
-                  <textarea
-                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm h-20 focus:ring-2 focus:ring-indigo-500"
-                    value={editingQuestion.data.Jawaban_Essay || ''}
-                    onChange={e => setEditingQuestion(prev => prev ? { ...prev, data: { ...prev.data, Jawaban_Essay: e.target.value } } : null)}
-                  />
-                </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1 text-slate-700">Kunci Jawaban Non-Essay (Misal: A atau A,C)</label>
+                      <input
+                        type="text"
+                        className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-indigo-500"
+                        value={editingQuestion.data.Kunci_Jawaban_Non_Essay || ''}
+                        onChange={e => setEditingQuestion(prev => prev ? { ...prev, data: { ...prev.data, Kunci_Jawaban_Non_Essay: e.target.value } } : null)}
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    <label className="block text-sm font-medium mb-1 text-slate-700">Kunci Jawaban Essay (Pedoman Penskoran)</label>
+                    <textarea
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm h-28 focus:ring-2 focus:ring-indigo-500"
+                      value={editingQuestion.data.Jawaban_Essay || ''}
+                      onChange={e => setEditingQuestion(prev => prev ? { ...prev, data: { ...prev.data, Jawaban_Essay: e.target.value } } : null)}
+                    />
+                  </div>
+                )}
               </div>
             )}
 

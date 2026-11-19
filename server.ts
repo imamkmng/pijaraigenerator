@@ -701,6 +701,7 @@ function normalizeQuestionObject(raw: any, index: number) {
   }
 
   const essay = raw.Jawaban_Essay ?? raw.jawaban_essay ?? raw.jawabanEssay ?? raw.pedoman_essay ?? raw.kunci_essay ?? raw.rubrik ?? '';
+  const isEssayType = jenis === 'ESSAY' || jenis === 'PILIHAN ESSAY';
 
   return {
     Nomor: nomor,
@@ -711,14 +712,14 @@ function normalizeQuestionObject(raw: any, index: number) {
     Isi_Referensi: normalizeQuickChartInText(cleanIsiRef),
     Soal: normalizeQuickChartInText(cleanSoalResult || effectiveSoal || String(soal)),
     File_Audio_Video: '',
-    Pilihan_A: optA !== '' ? cleanOption(optA) : undefined,
-    Pilihan_B: optB !== '' ? cleanOption(optB) : undefined,
-    Pilihan_C: optC !== '' ? cleanOption(optC) : undefined,
-    Pilihan_D: optD !== '' ? cleanOption(optD) : undefined,
-    Pilihan_E: optE !== '' ? cleanOption(optE) : undefined,
-    Pilihan_F: optF !== '' ? cleanOption(optF) : undefined,
-    Kunci_Jawaban_Non_Essay: cleanKunci,
-    Jawaban_Essay: normalizeQuickChartInText(String(essay))
+    Pilihan_A: !isEssayType && optA !== '' ? cleanOption(optA) : undefined,
+    Pilihan_B: !isEssayType && optB !== '' ? cleanOption(optB) : undefined,
+    Pilihan_C: !isEssayType && optC !== '' ? cleanOption(optC) : undefined,
+    Pilihan_D: !isEssayType && optD !== '' ? cleanOption(optD) : undefined,
+    Pilihan_E: !isEssayType && optE !== '' ? cleanOption(optE) : undefined,
+    Pilihan_F: !isEssayType && optF !== '' ? cleanOption(optF) : undefined,
+    Kunci_Jawaban_Non_Essay: isEssayType ? '' : cleanKunci,
+    Jawaban_Essay: isEssayType ? normalizeQuickChartInText(String(essay)) : ''
   };
 }
 
@@ -1259,6 +1260,9 @@ Tugas Anda adalah membuat bank soal ujian CBT berkualitas tinggi, mendalam, dan 
     : `* Semua butir soal menggunakan jenis: ${typesStr}.`}
   * Jika ada Pilihan Ganda Kompleks (PGK): Soal memiliki lebih dari 1 pilihan benar (misal 2 atau 3 jawaban benar), kunci pada Kunci_Jawaban_Non_Essay wajib berupa huruf pilihan dipisahkan koma tanpa spasi (contoh: "A,C" atau "B,D,E").
   * Jika ada Essay: Buat pertanyaan uraian analitis dan berikan pedoman penskoran serta kunci lengkap pada Jawaban_Essay.
+  * ATURAN MUTLAK JAWABAN ESSAY VS PG (FORMAT PIJAR CBT):
+    - Untuk jenis soal "PG" (Pilihan Ganda), "PGK", dan "MENGURUTKAN": Field Jawaban_Essay WAJIB BERUPA STRING KOSONG ("")! DILARANG KERAS mengisi pembahasan atau teks apapun di Jawaban_Essay pada soal PG/PGK karena format Pijar CBT melarang soal PG memiliki jawaban essay.
+    - Field Jawaban_Essay HANYA diisi untuk jenis soal "ESSAY" atau "PILIHAN ESSAY".
 
 === STANDAR KUALITAS PEDAGOGIS & AKURASI KONTEN ===
 1. Pemisahan Tegas Isi_Referensi (Stimulus) vs Soal vs Pilihan Jawaban (MUTLAK):
@@ -1282,8 +1286,8 @@ Tugas Anda adalah membuat bank soal ujian CBT berkualitas tinggi, mendalam, dan 
    - Hindari opsi klise seperti "Semua jawaban benar" atau "Tidak ada pilihan yang tepat".
 
 3. Konsistensi & Akurasi Mutlak Kunci Jawaban:
-   - Huruf pada Kunci_Jawaban_Non_Essay (misal: "B") WAJIB 100% selaras dengan opsi Pilihan_B.
-   - Pembahasan pada Jawaban_Essay WAJIB menjelaskan secara runtut mengapa opsi tersebut benar dan mengapa pengecoh lainnya kurang tepat. Dilarang bertolak belakang antara kunci dan pembahasan!
+   - Untuk soal PG, PGK, dan MENGURUTKAN: Huruf pada Kunci_Jawaban_Non_Essay (misal: "B" atau "A,C") WAJIB 100% selaras dengan opsi jawaban, dan field Jawaban_Essay WAJIB string kosong (""). Dilarang mengisi jawaban essay pada soal PG!
+   - Untuk soal ESSAY dan PILIHAN ESSAY: Kunci_Jawaban_Non_Essay WAJIB string kosong (""), dan Jawaban_Essay WAJIB berisi kunci/pedoman penskoran essay lengkap.
 
 4. Format Rumus & Simbol (LaTeX):
    - Jika terdapat rumus matematika, fisika, kimia, atau persamaan angka pecahan/akar/pangkat, gunakan sintaks LaTeX standar ($...$ untuk inline math dan $$...$$ untuk block math).
@@ -1315,8 +1319,8 @@ Format setiap objek soal dalam array:
 - Pilihan_D: Konten murni opsi D (tanpa label "D.")
 - Pilihan_E: Konten murni opsi E (kosongkan "" jika s/d D)
 - Pilihan_F: ""
-- Kunci_Jawaban_Non_Essay: Huruf kunci (misal "A", atau "A,C" jika PGK)
-- Jawaban_Essay: Pembahasan dan rubrik lengkap`;
+- Kunci_Jawaban_Non_Essay: Huruf kunci (misal "A", atau "A,C" jika PGK). WAJIB string kosong ("") jika jenis soal ESSAY.
+- Jawaban_Essay: Pedoman/kunci essay KHUSUS untuk jenis soal ESSAY atau PILIHAN ESSAY. Untuk soal PG, PGK, dan MENGURUTKAN, field ini WAJIB string kosong ("")!`;
 
     if (aiProvider !== 'gemini') {
       const baseUrl = getDefaultBaseUrl(aiProvider, customBaseUrl);
