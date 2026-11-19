@@ -396,6 +396,119 @@ export function preprocessMarkdown(text: string): string {
   return result;
 }
 
+// Helper untuk mencari posisi indeks awal opsi A, B, C di dalam teks (baik multiline maupun inline)
+function findOptionsStartIndex(text: string): number {
+  if (!text || typeof text !== 'string') return -1;
+
+  // 1. Cek apakah teks diawali langsung oleh opsi (misal "A. Komputer..." atau "Pilihan: A. ...")
+  const startMatch = text.match(/^\s*(?:(?:Pilihan(?:[\s_]*Jawaban)?|Opsi|Options?)\s*[:\-]?\s*)?[\[\(]?[A-Fa-f][\]\)\.\:]/i);
+  if (startMatch) {
+    return 0;
+  }
+
+  // 2. Opsi yang diawali baris baru (\nA. atau \n(A) atau \n- A.)
+  const multilineMatch = text.match(/(?:\n|\r\n)\s*(?:(?:Pilihan(?:[\s_]*Jawaban)?|Opsi|Options?)\s*[:\-]?\s*)?[\[\(]?[A-Fa-f][\]\)\.\:]/i);
+  if (multilineMatch && multilineMatch.index !== undefined) {
+    return multilineMatch.index;
+  }
+
+  // 3. Opsi inline: sequence A. ... B. ... C. ... pada baris yang sama (contoh: "... manusia? A. ... B. ... C. ...")
+  const inlineMatch = text.match(/(?:^|[\s\.\?\:\;\!])\s*(?:(?:Pilihan(?:[\s_]*Jawaban)?|Opsi|Options?)\s*[:\-]?\s*)?[\[\(]?A[\]\)\.\:]\s+[\s\S]+?[\s\.\?\:\;\!][\[\(]?B[\]\)\.\:]\s+[\s\S]+?[\s\.\?\:\;\!][\[\(]?C[\]\)\.\:]/i);
+  if (inlineMatch && inlineMatch.index !== undefined) {
+    const sub = text.substring(inlineMatch.index);
+    const aMatch = sub.match(/(?:(?:Pilihan(?:[\s_]*Jawaban)?|Opsi|Options?)\s*[:\-]?\s*)?[\[\(]?A[\]\)\.\:]/i);
+    if (aMatch && aMatch.index !== undefined) {
+      return inlineMatch.index + aMatch.index;
+    }
+    return inlineMatch.index;
+  }
+
+  return -1;
+}
+
+// Helper untuk mengekstrak opsi dari teks baik multiline maupun satu baris (inline)
+function extractOptionsFromText(text: string): Record<string, string> {
+  if (!text || typeof text !== 'string') return {};
+  const found: Record<string, string> = {};
+
+  const regex = /(?:^|[\s\n\r])\s*(?:[\*\-\•]\s*)?(?:[\[\(])?([A-Fa-f])[\]\)\.\:]\s*/g;
+  const matches: { letter: string; index: number; length: number }[] = [];
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    matches.push({ letter: m[1].toUpperCase(), index: m.index, length: m[0].length });
+  }
+
+  for (let i = 0; i < matches.length; i++) {
+    const cur = matches[i];
+    const next = matches[i + 1];
+    const start = cur.index + cur.length;
+    const end = next ? next.index : text.length;
+    const content = text.substring(start, end).trim();
+    if (!found[cur.letter] && content) {
+      found[cur.letter] = content;
+    }
+  }
+
+  return found;
+}
+
+// Helper untuk membersihkan wacana/stimulus agar BEBAS dari pilihan jawaban A, B, C, D dan kalimat soal
+function cleanStimulusText(text: string, currentSoal?: string): string {
+  if (!text || typeof text !== 'string') return '';
+  let s = text.trim();
+
+  // 1. Potong bagian opsi jika terdeteksi di dalam stimulus
+  const optIdx = findOptionsStartIndex(s);
+  if (optIdx === 0) {
+    return '';
+  }
+  if (optIdx > 0) {
+    s = s.substring(0, optIdx).trim();
+  }
+
+  // Bersihkan sisa header "Pilihan Jawaban:" atau "Pertanyaan:" di ujung teks wacana
+  s = s.replace(/(?:(?:\n|\r\n)?\s*(?:Pilihan(?:[\s_]*Jawaban)?|Opsi|Daftar Pilihan|Pertanyaan|Soal)\s*[:\-]?\s*)$/i, '').trim();
+
+  // 2. Jika ada kalimat soal yang ikut tertempel di akhir wacana, potong kalimat soalnya
+  if (currentSoal && typeof currentSoal === 'string') {
+    const cleanCurrentSoal = currentSoal.trim();
+    if (cleanCurrentSoal && s.toLowerCase().endsWith(cleanCurrentSoal.toLowerCase())) {
+      s = s.substring(0, s.length - cleanCurrentSoal.length).trim();
+    }
+  }
+
+  // 3. Periksa apakah wacana yang tersisa sebenarnya HANYA berupa pertanyaan (bukan wacana bacaan)
+  if (currentSoal && typeof currentSoal === 'string') {
+    const normS = s.replace(/\s+/g, ' ').trim().toLowerCase();
+    const normSoal = currentSoal.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (normS === normSoal || (normSoal.length > 20 && (normS.includes(normSoal) || normSoal.includes(normS)))) {
+      return '';
+    }
+  }
+
+  // Jika teks wacana hanya 1 kalimat pertanyaan langsung tanpa narasi wacana
+  const isDirectQuestion = /^(?:Mengapa|Bagaimana|Apa|Apakah|Siapa|Siapakah|Manakah|Berapa|Berapakah|Di\s*mana|Ke\s*mana|Dari\s*mana|Kenapa|Jelaskan|Sebutkan|Tentukan|Berikut\s+yang|Pernyataan\s+yang|Dibawah\s+ini|Di\s+bawah\s+ini|Yang\s+merupakan)\b/i.test(s) && (s.endsWith('?') || s.endsWith(':')) && s.length < 300;
+  if (isDirectQuestion && !s.includes('\n')) {
+    return '';
+  }
+
+  return s;
+}
+
+// Helper untuk membersihkan teks soal agar tidak memuat opsi A, B, C, D di dalamnya jika opsi sudah ada di field terpisah
+function cleanSoalText(text: string, hasSeparateOptions: boolean): string {
+  if (!text || typeof text !== 'string') return '';
+  let s = text.trim();
+  if (hasSeparateOptions) {
+    const optIdx = findOptionsStartIndex(s);
+    if (optIdx > 5) {
+      s = s.substring(0, optIdx).trim();
+    }
+    s = s.replace(/(?:(?:\n|\r\n)?\s*(?:Pilihan(?:[\s_]*Jawaban)?|Opsi|Daftar Pilihan)\s*[:\-]?\s*)$/i, '').trim();
+  }
+  return s;
+}
+
 // --- Native Mermaid Diagram Parser & Renderer (Instant, Offline) ---
 function parseMermaidCode(url: string): string {
   if (!url || typeof url !== 'string' || !url.includes('mermaid')) return '';
@@ -579,7 +692,7 @@ class PollinationsQueue {
 
   public register(url: string, listener: PollinationsListener): () => void {
     const cleanUrl = url.trim();
-    if (!cleanUrl) return () => {};
+    if (!cleanUrl) return () => { };
 
     if (!this.listeners.has(cleanUrl)) {
       this.listeners.set(cleanUrl, new Set());
@@ -878,7 +991,7 @@ const PollinationsImageLoader = ({ src, alt, ...props }: any) => {
   const waitSec = Math.max(0, itemState.secondsRemaining);
   const queuePos = itemState.queuePosition || 1;
   const progressPercent = Math.min(100, Math.max(5, 100 - (waitSec / ((queuePos * 60) || 60) * 100)));
-  const waitFormatted = waitSec >= 60 
+  const waitFormatted = waitSec >= 60
     ? `${Math.floor(waitSec / 60)} mnt ${waitSec % 60 > 0 ? (waitSec % 60) + ' dtk' : ''}`.trim()
     : `${waitSec} detik`;
 
@@ -1005,8 +1118,8 @@ const MarkdownImage = ({ src, alt, ...props }: any) => {
           </div>
         </div>
         <p className="text-[11px] text-amber-700">
-          {isQuickChart 
-            ? 'Grafik PNG tidak dapat dimuat langsung oleh browser. Periksa koneksi internet atau klik tombol di atas.' 
+          {isQuickChart
+            ? 'Grafik PNG tidak dapat dimuat langsung oleh browser. Periksa koneksi internet atau klik tombol di atas.'
             : 'Gambar tidak dapat dimuat langsung oleh browser. Klik tautan di atas untuk melihat gambar di tab baru.'}
         </p>
       </div>
@@ -1030,9 +1143,8 @@ const MarkdownImage = ({ src, alt, ...props }: any) => {
         src={src}
         alt={alt || (isQuickChart ? 'Grafik Soal (PNG)' : 'Visual Soal')}
         referrerPolicy="no-referrer"
-        className={`max-w-full h-auto rounded-xl bg-white shadow-sm border border-slate-200 block transition-opacity duration-200 ${
-          isLoading ? 'opacity-0 min-h-[120px] min-w-[240px]' : 'opacity-100'
-        }`}
+        className={`max-w-full h-auto rounded-xl bg-white shadow-sm border border-slate-200 block transition-opacity duration-200 ${isLoading ? 'opacity-0 min-h-[120px] min-w-[240px]' : 'opacity-100'
+          }`}
         loading="eager"
         onLoad={() => {
           setIsLoading(false);
@@ -1784,7 +1896,7 @@ export default function App() {
         return list.map((q: QuestionData) => ({
           ...q,
           Soal: preprocessMarkdown(q.Soal),
-          Isi_Referensi: preprocessMarkdown(q.Isi_Referensi),
+          Isi_Referensi: cleanStimulusText(preprocessMarkdown(q.Isi_Referensi)),
           Pilihan_A: preprocessMarkdown(q.Pilihan_A),
           Pilihan_B: preprocessMarkdown(q.Pilihan_B),
           Pilihan_C: preprocessMarkdown(q.Pilihan_C),
@@ -1958,6 +2070,14 @@ export default function App() {
       jenis = 'MENGURUTKAN';
     }
 
+    const cleanOption = (val: any): string => {
+      if (val === undefined || val === null) return '';
+      let s = String(val).trim();
+      // Bersihkan awalan huruf opsi redundan seperti "A. ", "A) ", "(A) ", "A: "
+      s = s.replace(/^(?:[\[\(]?[A-Fa-f][\]\)\.\:]\s*|\-\s*)/, '').trim();
+      return s;
+    };
+
     let optA = raw.Pilihan_A ?? raw.pilihan_a ?? raw.pilihanA ?? raw.opsi_a ?? raw.opsiA ?? raw.A ?? raw.a ?? '';
     let optB = raw.Pilihan_B ?? raw.pilihan_b ?? raw.pilihanB ?? raw.opsi_b ?? raw.opsiB ?? raw.B ?? raw.b ?? '';
     let optC = raw.Pilihan_C ?? raw.pilihan_c ?? raw.pilihanC ?? raw.opsi_c ?? raw.opsiC ?? raw.C ?? raw.c ?? '';
@@ -1976,9 +2096,44 @@ export default function App() {
       if (!optF && optionsArr[5] !== undefined) optF = getOptText(optionsArr[5]);
     }
 
+    const rawIsiRef = String(raw.Isi_Referensi || raw.isi_referensi || raw.stimulus || raw.bacaan || '');
+    let effectiveSoal = String(soal || '').trim();
+
+    // Jika AI keliru menaruh opsi di dalam Isi_Referensi atau Soal, selamatkan opsi tersebut jika optA masih kosong
+    if (!optA && !optB) {
+      const optsFromRef = extractOptionsFromText(rawIsiRef);
+      const optsFromSoal = extractOptionsFromText(effectiveSoal);
+      const fallbackOpts = Object.keys(optsFromRef).length >= 2 ? optsFromRef : optsFromSoal;
+      if (fallbackOpts['A']) optA = fallbackOpts['A'];
+      if (fallbackOpts['B']) optB = fallbackOpts['B'];
+      if (fallbackOpts['C']) optC = fallbackOpts['C'];
+      if (fallbackOpts['D']) optD = fallbackOpts['D'];
+      if (fallbackOpts['E']) optE = fallbackOpts['E'];
+      if (fallbackOpts['F']) optF = fallbackOpts['F'];
+    }
+
+    // Jika Soal kosong tapi Isi_Referensi memiliki kalimat pertanyaan sebelum opsi
+    if (!effectiveSoal && rawIsiRef) {
+      const optIdx = findOptionsStartIndex(rawIsiRef);
+      if (optIdx > 0) {
+        effectiveSoal = rawIsiRef.substring(0, optIdx).trim();
+      }
+    }
+
+    const hasSeparateOpts = Boolean(optA || optB);
+    const cleanSoalResult = cleanSoalText(effectiveSoal, hasSeparateOpts);
+
+    // Bersihkan wacana/stimulus agar BEBAS dari pilihan jawaban A, B, C, D dan kalimat soal
+    const cleanIsiRef = cleanStimulusText(rawIsiRef, cleanSoalResult || effectiveSoal);
+
     let kunci = raw.Kunci_Jawaban_Non_Essay ?? raw.kunci_jawaban_non_essay ?? raw.kunci_jawaban ?? raw.kunciJawaban ?? raw.kunci ?? raw.jawaban_benar ?? raw.answer ?? raw.correct ?? '';
     if (Array.isArray(kunci)) {
       kunci = kunci.join(',');
+    }
+    let cleanKunci = String(kunci).trim().toUpperCase();
+    const matchedKey = cleanKunci.match(/[A-F](?:\s*,\s*[A-F])*/);
+    if (matchedKey) {
+      cleanKunci = matchedKey[0].replace(/\s+/g, '');
     }
 
     const essay = raw.Jawaban_Essay ?? raw.jawaban_essay ?? raw.jawabanEssay ?? raw.pedoman_essay ?? raw.kunci_essay ?? raw.rubrik ?? '';
@@ -1988,17 +2143,17 @@ export default function App() {
       Jenis_Soal: jenis,
       Nilai: Number(raw.Nilai || raw.nilai || 10) || 10,
       Nama_Materi: String(raw.Nama_Materi || raw.nama_materi || raw.materi || raw.topik || ''),
-      Judul_Referensi: String(raw.Judul_Referensi || raw.judul_referensi || raw.judul || ''),
-      Isi_Referensi: String(raw.Isi_Referensi || raw.isi_referensi || raw.stimulus || raw.bacaan || ''),
-      Soal: String(soal),
+      Judul_Referensi: cleanIsiRef ? String(raw.Judul_Referensi || raw.judul_referensi || raw.judul || '') : '',
+      Isi_Referensi: cleanIsiRef,
+      Soal: cleanSoalResult || effectiveSoal || String(soal),
       File_Audio_Video: '',
-      Pilihan_A: optA !== '' ? String(optA) : undefined,
-      Pilihan_B: optB !== '' ? String(optB) : undefined,
-      Pilihan_C: optC !== '' ? String(optC) : undefined,
-      Pilihan_D: optD !== '' ? String(optD) : undefined,
-      Pilihan_E: optE !== '' ? String(optE) : undefined,
-      Pilihan_F: optF !== '' ? String(optF) : undefined,
-      Kunci_Jawaban_Non_Essay: String(kunci).trim().toUpperCase(),
+      Pilihan_A: optA !== '' ? cleanOption(optA) : undefined,
+      Pilihan_B: optB !== '' ? cleanOption(optB) : undefined,
+      Pilihan_C: optC !== '' ? cleanOption(optC) : undefined,
+      Pilihan_D: optD !== '' ? cleanOption(optD) : undefined,
+      Pilihan_E: optE !== '' ? cleanOption(optE) : undefined,
+      Pilihan_F: optF !== '' ? cleanOption(optF) : undefined,
+      Kunci_Jawaban_Non_Essay: cleanKunci,
       Jawaban_Essay: String(essay)
     };
   };
@@ -2072,8 +2227,8 @@ export default function App() {
 
     // Convert Python literals when appearing as values
     text = text.replace(/:\s*True\b/g, ': true')
-               .replace(/:\s*False\b/g, ': false')
-               .replace(/:\s*None\b/g, ': null');
+      .replace(/:\s*False\b/g, ': false')
+      .replace(/:\s*None\b/g, ': null');
 
     // Normalize smart quotes
     text = text.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
@@ -2476,6 +2631,96 @@ export default function App() {
     throw new Error('Respons model tidak mengandung format soal yang dapat dibaca. Silakan generate kembali.');
   };
 
+  // Helper to construct a rigorous, high-quality Kurikulum Merdeka CBT prompt
+  const buildQuestionsPrompt = (payload: any): string => {
+    const typesStr = Array.isArray(payload.questionTypes) && payload.questionTypes.length > 0
+      ? payload.questionTypes.join(', ')
+      : 'PG';
+    const targetCount = Number(payload.count) || 5;
+    const optCount = Number(payload.optionCount) || 5;
+    const lastOptionLetter = optCount === 4 ? 'D' : optCount === 6 ? 'F' : 'E';
+
+    return `Anda adalah seorang ahli penyusun soal ujian nasional dan kurikulum sekolah profesional berstandar internasional (Kurikulum Merdeka).
+Tugas Anda adalah membuat bank soal ujian CBT berkualitas tinggi, mendalam, dan terstruktur rapi.
+
+=== INFORMASI UTAMA & SASARAN KELAS ===
+- Mata Pelajaran: ${payload.subject}
+- Fase & Kelas: Fase ${payload.fase || '-'}, Kelas ${payload.grade}
+- Topik / Materi Utama: ${payload.topic}
+- Capaian Pembelajaran (CP): ${payload.capaianPembelajaran || '-'}
+- Tujuan Pembelajaran (TP): ${payload.learningObjective || '-'}
+- Level Kognitif (Taksonomi Bloom): ${payload.cognitiveLevel || 'LOTS (C1-C2)'}
+- Bahasa Soal: ${payload.language || 'Indonesia'} (Isi pertanyaan, stimulus, dan jawaban wajib menggunakan bahasa ini)
+
+=== TARGET JUMLAH & DISTRIBUSI SOAL (MUTLAK WAJIB TEPAT) ===
+- TARGET JUMLAH SOAL: TEPAT ${targetCount} BUTIR SOAL (Dilarang membuat kurang dari ${targetCount} dan dilarang membuat lebih).
+- Penomoran Soal: Nomor 1 sampai ${targetCount} secara berurutan tanpa ada nomor yang terlewat.
+- Komposisi Jenis Soal (${typesStr}):
+  ${Array.isArray(payload.questionTypes) && payload.questionTypes.length > 1
+        ? `* Wajib variasikan dan distribusikan soal secara proporsional sesuai pilihan (${typesStr}). Jangan hanya membuat satu jenis saja.`
+        : `* Semua butir soal menggunakan jenis: ${typesStr}.`}
+  * Jika ada Pilihan Ganda Kompleks (PGK): Soal memiliki lebih dari 1 pilihan benar (misal 2 atau 3 jawaban benar), kunci pada Kunci_Jawaban_Non_Essay wajib berupa huruf pilihan dipisahkan koma tanpa spasi (contoh: "A,C" atau "B,D,E").
+  * Jika ada Essay: Buat pertanyaan uraian analitis dan berikan pedoman penskoran serta kunci lengkap pada Jawaban_Essay.
+
+=== STANDAR KUALITAS PEDAGOGIS & AKURASI KONTEN ===
+1. Pemisahan Tegas Isi_Referensi (Stimulus) vs Soal vs Pilihan Jawaban (MUTLAK):
+   - ATURAN MUTLAK ISI_REFERENSI (WACANA/STIMULUS):
+     * Field Isi_Referensi HANYA untuk teks bacaan/wacana, kutipan artikel, skenario studi kasus, narasi cerita, atau data tabel/grafik.
+     * DILARANG KERAS MEMASUKKAN PILIHAN JAWABAN (A, B, C, D, E) KE DALAM ISI_REFERENSI!
+     * DILARANG KERAS MEMASUKKAN PERTANYAAN KE DALAM ISI_REFERENSI!
+     * Jika ada poin-poin/pernyataan di dalam stimulus bacaan, gunakan angka (1, 2, 3...) atau Romawi (I, II, III...), DILARANG menggunakan huruf A, B, C, D agar tidak menimbulkan kerancuan dengan pilihan jawaban.
+     * Jika butir soal berupa pertanyaan langsung tanpa wacana bacaan panjang, field Isi_Referensi dan Judul_Referensi WAJIB diisi string kosong ("").
+   - ATURAN MUTLAK SOAL (PERTANYAAN):
+     * Field Soal HANYA berisi kalimat pokok pertanyaan atau instruksi tugas ujian.
+     * DILARANG KERAS mencantumkan teks opsi pilihan jawaban (A, B, C, D) di dalam field Soal!
+   - ATURAN MUTLAK PILIHAN JAWABAN:
+     * Seluruh pilihan jawaban WAJIB HANYA diletakkan di field masing-masing: Pilihan_A, Pilihan_B, Pilihan_C, Pilihan_D, Pilihan_E.
+     * KONTEN OPSI MURNI: DILARANG menuliskan label huruf opsi (seperti "A.", "B.", "(A)") di dalam teks pilihan. Tulis langsung konten opsinya saja.
+
+2. Kualitas Pilihan Jawaban (Opsi A s/d ${lastOptionLetter}):
+   - Sediakan tepat ${optCount} pilihan jawaban: Pilihan_A, Pilihan_B, Pilihan_C, Pilihan_D${optCount >= 5 ? ', Pilihan_E' : ''}${optCount >= 6 ? ', Pilihan_F' : ''}.
+   - Field pilihan yang tidak digunakan (${optCount === 4 ? 'Pilihan_E dan Pilihan_F' : 'Pilihan_F'}) WAJIB dikosongkan ("").
+   - Pengecoh Bermutu Tinggi (Plausible Distractors): Pengecoh harus homogen, logis, berkaitan langsung dengan materi, dan mencerminkan kekeliruan analisis atau miskonsepsi umum siswa.
+   - Hindari opsi klise seperti "Semua jawaban benar" atau "Tidak ada pilihan yang tepat".
+
+3. Konsistensi & Akurasi Mutlak Kunci Jawaban:
+   - Huruf pada Kunci_Jawaban_Non_Essay (misal: "B") WAJIB 100% selaras dengan opsi Pilihan_B.
+   - Pembahasan pada Jawaban_Essay WAJIB menjelaskan secara runtut mengapa opsi tersebut benar dan mengapa pengecoh lainnya kurang tepat. Dilarang bertolak belakang antara kunci dan pembahasan!
+
+4. Format Rumus & Simbol (LaTeX):
+   - Jika terdapat rumus matematika, fisika, kimia, atau persamaan angka pecahan/akar/pangkat, gunakan sintaks LaTeX standar ($...$ untuk inline math dan $$...$$ untuk block math).
+   - Di dalam nilai string JSON, tuliskan karakter backslash dengan escape yang benar (contoh: "\\\\frac{1}{2}").
+${payload.referenceText ? `\n=== TEKS REFERENSI / BAHAN RUJUKAN DARI PENGGUNA ===\n${payload.referenceText}\n(Gunakan teks rujukan di atas secara mendalam sebagai dasar pembuatan soal)` : ''}
+${payload.uniformLength ? '\n- WAJIB Keseragaman Panjang Pilihan: Buat panjang kalimat semua pilihan jawaban (A, B, C, D, dsb) relatif seragam agar tidak memberi petunjuk visual jawaban benar.' : ''}
+${payload.studentMisconception ? '\n- WAJIB Miskonsepsi Siswa: Rancang pengecoh agar merepresentasikan kekeliruan konsep atau kesalahan hitung yang lazim dilakukan siswa.' : ''}
+${payload.noExtraExplanation ? '\n- DILARANG Penjelasan Ekstra di Pilihan: Pada pilihan opsi jawaban, tuliskan HANYA poin jawaban inti tanpa menambahkan kata "karena" atau alasan di dalam teks opsi.' : ''}
+${payload.supportEquation ? '\n- WAJIB sertakan soal yang mengandung RUMUS (Equation) matematika/fisika/kimia dengan LaTeX ($...$ atau $$...$$).' : '\n- DILARANG menggunakan RUMUS (Equation) LaTeX.'}
+${payload.supportImage ? '\n- WAJIB sertakan GAMBAR ilustrasi pada 1 sampai 2 soal menggunakan markdown: ![deskripsi](https://image.pollinations.ai/prompt/detailed-description-in-english?width=400&height=300&nologo=true).' : '\n- DILARANG menyertakan GAMBAR/ilustrasi markdown.'}
+${payload.supportGraph ? '\n- WAJIB sertakan soal dengan analisis GRAFIK menggunakan QuickChart valid: ![Grafik](https://quickchart.io/chart?bkg=white&w=500&h=300&c={...}). Dilarang memakai tanda kurung () di label chart.' : '\n- DILARANG membuat soal berbasis grafik.'}
+${payload.supportDiagram ? '\n- WAJIB sertakan soal dengan DIAGRAM siklus/alur proses menggunakan blok ```mermaid ... ``` atau markdown ![Diagram](https://mermaid.ink/img/...).' : '\n- DILARANG membuat soal berbasis diagram.'}
+${payload.additionalInstructions ? `\n=== INSTRUKSI KHUSUS TAMBAHAN ===\n${payload.additionalInstructions}` : ''}
+
+=== STRUKTUR OUTPUT JSON (MUTLAK KETAT) ===
+Output Anda HARUS diawali karakter '[' dan diakhiri ']'. HANYA kembalikan JSON array murni tanpa pembungkus \`\`\`json dan tanpa teks pembuka/penutup apapun.
+Format setiap objek soal dalam array:
+- Nomor: urutan soal (1 s/d ${targetCount})
+- Jenis_Soal: "PG", "ESSAY", "PILIHAN ESSAY", "PGK", atau "MENGURUTKAN"
+- Nilai: 10
+- Nama_Materi: Tipe String
+- Judul_Referensi: Tipe String (judul stimulus wacana jika ada, atau "" jika tidak ada wacana)
+- Isi_Referensi: Tipe String (HANYA teks wacana/stimulus bacaan murni. DILARANG KERAS memuat pertanyaan atau pilihan A, B, C, D di sini! Wajib "" jika soal langsung)
+- Soal: Pertanyaan ujian lengkap (HANYA kalimat tanya/instruksi, TANPA opsi A, B, C, D)
+- File_Audio_Video: ""
+- Pilihan_A: Konten murni opsi A (tanpa label "A.")
+- Pilihan_B: Konten murni opsi B (tanpa label "B.")
+- Pilihan_C: Konten murni opsi C (tanpa label "C.")
+- Pilihan_D: Konten murni opsi D (tanpa label "D.")
+- Pilihan_E: Konten murni opsi E (kosongkan "" jika s/d D)
+- Pilihan_F: ""
+- Kunci_Jawaban_Non_Essay: Huruf kunci (misal "A", atau "A,C" jika PGK)
+- Jawaban_Essay: Pembahasan dan rubrik lengkap`;
+  };
+
   // Direct client-side generation fallback if serverless functions are not deployed
   const callAiClientSide = async (payload: any) => {
     const provider: AIProvider = payload.aiProvider || 'gemini';
@@ -2486,75 +2731,33 @@ export default function App() {
       throw new Error(`API Key untuk ${providerConfig.name} tidak ditemukan. Silakan masukkan API Key di Pengaturan AI.`);
     }
 
-    const typesStr = Array.isArray(payload.questionTypes) && payload.questionTypes.length > 0
-      ? payload.questionTypes.join(', ')
-      : 'PG';
+    const targetCount = Number(payload.count) || 5;
+    const maxTokens = Math.min(16384, Math.max(4096, targetCount * 850));
+    const prompt = buildQuestionsPrompt(payload);
 
-    const prompt = `Anda adalah seorang ahli pembuat soal ujian profesional.
-Bahasa Soal: ${payload.language || 'Indonesia'} (Pastikan isi soal dan jawaban menggunakan bahasa ini)
-Pelajaran: ${payload.subject}
-Fase: ${payload.fase || '-'}
-Kelas: ${payload.grade}
-Materi: ${payload.topic}
-Capaian Pembelajaran: ${payload.capaianPembelajaran || '-'}
-Tujuan Pembelajaran: ${payload.learningObjective || '-'}
-Level Kognitif (Taksonomi Bloom): ${payload.cognitiveLevel || 'LOTS (C1-C2)'}
-Jumlah Soal: ${payload.count}
-Jenis Soal yang Boleh Digunakan: ${typesStr} (Bisa salah satu atau kombinasi jika ada beberapa jenis)
-Jumlah Pilihan Jawaban (Jika pilihan ganda): ${payload.optionCount || 5} (Misal 4 berarti sampai D, 5 berarti sampai E, 6 berarti sampai F). Kosongkan value Pilihan_E dan Pilihan_F jika tidak digunakan.
-${payload.referenceText ? `\nTeks Referensi / Bahan Bacaan:\n${payload.referenceText}\n(Gunakan teks di atas sebagai dasar pembuatan soal)` : ''}
-${payload.uniformLength ? `\n- WAJIB Keseragaman Panjang Pilihan: Pastikan semua pilihan jawaban (A, B, C, D, dsb) memiliki panjang kalimat atau jumlah kata yang hampir sama (seragam) agar siswa tidak mudah menebak jawaban dari sekadar panjangnya pilihan.` : ''}
-${payload.studentMisconception ? `\n- WAJIB Gunakan Miskonsepsi Siswa: Untuk pilihan jawaban salah (pengecoh/distractor), rancang sedemikian rupa agar jawaban tersebut merepresentasikan miskonsepsi umum atau kesalahan hitung/analisa yang biasa dilakukan oleh siswa (jawaban masuk akal/plausible).` : ''}
-${payload.noExtraExplanation ? `\n- DILARANG Memberi Penjelasan Ekstra: Pada pilihan jawaban, berikan HANYA poin jawaban inti saja tanpa menambahkan alasan, argumen, kata "karena", atau teks penjelasan tambahan apa pun di dalam opsi jawaban.` : ''}
-${payload.supportEquation ? `\n- WAJIB sertakan soal yang mengandung RUMUS (Equation) matematika/fisika/kimia atau logika analitik menggunakan sintaks LaTeX (blok \`$$\` atau inline \`$\`).` : '\n- DILARANG menggunakan RUMUS (Equation) atau format LaTeX dalam bentuk apapun pada soal dan jawaban.'}
-${payload.supportImage ? `\n- WAJIB sertakan GAMBAR ilustrasi pada soal (cukup 1 sampai 2 gambar per paket soal agar antrean render efisien). Gunakan format markdown: \`![deskripsi](https://image.pollinations.ai/prompt/detailed-description-of-image-in-english?width=400&height=300&nologo=true)\` di dalam teks Soal. Ganti \`detailed-description-of-image-in-english\` dengan deskripsi spesifik tentang apa yang diilustrasikan di soal (WAJIB bahasa Inggris, pisahkan kata dengan tanda penghubung "-", BUKAN SPASI). Contoh: \`https://image.pollinations.ai/prompt/a-green-leaf-showing-photosynthesis-process?width=400&height=300&nologo=true\`.` : '\n- DILARANG menyertakan GAMBAR/ilustrasi markdown dalam bentuk apapun pada soal dan jawaban.'}
-${payload.supportGraph ? `\n- WAJIB buatkan satu atau beberapa soal yang memerlukan analisis GRAFIK. Gunakan markdown image QuickChart.io yang valid: \`![Grafik](https://quickchart.io/chart?bkg=white&w=500&h=300&c={"type":"bar","data":{"labels":["A","B"],"datasets":[{"label":"Nilai","data":[10,20]}]}})\`. PENTING: Pada teks label/judul chart, DILARANG memakai tanda kurung '(' atau ')' (tulis 'dalam Mbps' atau 'Mbps', JANGAN gunakan '(Mbps)'). Jangan gunakan spasi berlebihan dalam URL.` : '\n- DILARANG membuat soal yang menggunakan atau memerlukan analisis GRAFIK atau chart.'}
-${payload.supportDiagram ? `\n- WAJIB buatkan satu atau beberapa soal yang memerlukan pemahaman DIAGRAM PROSES/SIKLUS (misalnya siklus air, fotosintesis, rantai makanan, daur biogeokimia, proses pembelahan sel, bagan alur). Tulis diagram menggunakan blok kode \`\`\`mermaid\ngraph TD\n  A --> B\n\`\`\` ATAU markdown \`![Diagram](https://mermaid.ink/img/{BASE64})\`. Diagram harus sederhana dan mudah dipahami.` : '\n- DILARANG membuat soal yang menggunakan DIAGRAM PROSES/SIKLUS berbasis Mermaid.'}
-${payload.additionalInstructions ? `\nInstruksi Khusus Tambahan: ${payload.additionalInstructions}` : ''}
-
-PENTING: Jika ada rumus matematika, fisika, kimia, atau persamaan (misal pecahan, pangkat, dll), BERIKAN dalam format LaTeX menggunakan \`$\` untuk inline math (contoh: $E=mc^2$) dan \`$$\` untuk block math (contoh: $$ \\sqrt{x} $$). Jangan gunakan format lain. Gunakan perintah-perintah LaTeX standar (seperti \\frac, \\sqrt, pangkat, subscript) agar hasil dirender dengan baik. Saat menuliskan backslash LaTeX ke dalam value JSON, pastikan menggunakan dua backslash (contoh di dalam JSON: "Rumus \\\\frac{1}{2}"). Jangan gunakan backslash berlebihan (hindari \\\\\\\\frac).
-
-Buatkan ${payload.count} soal dengan format JSON yang ketat mengikuti struktur berikut:
-Setiap soal adalah objek dalam sebuah array dengan field (semua field huruf kapital di awal, sesuai dengan yang diminta di bawah, persis):
-- Nomor: urutan soal (integer)
-- Jenis_Soal: tipe soal, HANYA BISA: "PG" (Pilihan Ganda), "ESSAY", "PILIHAN ESSAY" (Pilihan Ganda dan Essay), "PGK" (Pilihan Ganda Kompleks - jawaban benar lebih dari 1), atau "MENGURUTKAN". Pastikan tipe yang dipilih sesuai dengan array Jenis Soal yang Boleh Digunakan (${typesStr}).
-- Nilai: poin default soal (misal 10)
-- Nama_Materi: Tipe String
-- Judul_Referensi: Tipe String, bisa kosongkan "" jika tidak ada.
-- Isi_Referensi: Tipe String, bagian bacaan cerita / teks rujukan soal, bisa ""
-- Soal: Pertanyaan dari ujian, tidak boleh kosong.
-- File_Audio_Video: Tipe string, tulis "" (kosong) saja.
-- Pilihan_A: String pilihan A (Jika bukan Essay)
-- Pilihan_B: String pilihan B
-- Pilihan_C: String pilihan C
-- Pilihan_D: String pilihan D
-- Pilihan_E: String pilihan E (boleh kosong jika s/d D saja)
-- Pilihan_F: String pilihan F (boleh kosong)
-- Kunci_Jawaban_Non_Essay: Jawaban benar misal "A", atau "A,C" (TANPA SPASI) untuk PGK, kosongkan jika berupa full Essay.
-- Jawaban_Essay: Kunci jawaban lengkap jika ESSAY atau PILIHAN ESSAY, kosongkan "" jika pure PG.
-
-PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA return JSON array murni tanpa dibungkus kode block markdown \`\`\`json dan tanpa teks pembuka/penutup apapun.`;
+    let parsedQuestions: QuestionData[] = [];
+    let effectiveUsedModel = '';
 
     if (provider === 'gemini') {
-      const requestModel = async (modelName: string) => {
+      const requestModelWithPrompt = async (modelName: string, promptText: string) => {
         const clean = modelName.trim().replace(/^models\//, '');
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(clean)}:generateContent?key=${apiKey}`;
         return await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            contents: [{ role: 'user', parts: [{ text: promptText }] }],
             generationConfig: {
               responseMimeType: 'application/json',
               temperature: Math.max(0, Math.min(1, payload.temperature ?? 0.7)),
-              maxOutputTokens: 8192
+              maxOutputTokens: Math.min(16384, Math.max(8192, maxTokens))
             }
           })
         });
       };
 
       let targetModel = resolveEffectiveModel('gemini', payload.customModel);
-      let res = await requestModel(targetModel);
+      let res = await requestModelWithPrompt(targetModel, prompt);
 
       // Otomatis ganti ke model dengan limit lebih besar jika kuota habis (429), sibuk (503), atau model tidak ada (404)
       if (!res.ok && autoFallbackQuota) {
@@ -2585,7 +2788,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
           for (const cand of GEMINI_FALLBACKS) {
             if (cand === targetModel) continue;
             try {
-              const retryRes = await requestModel(cand);
+              const retryRes = await requestModelWithPrompt(cand, prompt);
               if (retryRes.ok) {
                 res = retryRes;
                 targetModel = cand;
@@ -2604,7 +2807,6 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
 
       const data = await res.json();
       const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
-      let parsedQuestions: QuestionData[] = [];
       try {
         parsedQuestions = parseQuestionsJson(rawText);
       } catch (parseErr) {
@@ -2628,7 +2830,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
         for (const cand of GEMINI_FALLBACKS) {
           if (cand === targetModel) continue;
           try {
-            const retryRes = await requestModel(cand);
+            const retryRes = await requestModelWithPrompt(cand, prompt);
             if (retryRes.ok) {
               const retryData = await retryRes.json();
               const retryRaw = retryData.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -2639,13 +2841,13 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                 break;
               }
             }
-          } catch {}
+          } catch { }
         }
         if (parsedQuestions.length === 0) {
           throw parseErr;
         }
       }
-      return { questions: parsedQuestions, modelUsed: targetModel, provider };
+      effectiveUsedModel = targetModel;
     } else {
       const baseUrl = (payload.customBaseUrl || providerConfig.defaultBaseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
       const targetModel = resolveEffectiveModel(provider, payload.customModel);
@@ -2677,7 +2879,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
             }
           ],
           temperature: Math.max(0, Math.min(1.5, payload.temperature ?? 0.7)),
-          max_tokens: 4096
+          max_tokens: maxTokens
         })
       });
 
@@ -2718,7 +2920,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                     { role: 'user', content: prompt }
                   ],
                   temperature: Math.max(0, Math.min(1.5, payload.temperature ?? 0.7)),
-                  max_tokens: 4096
+                  max_tokens: maxTokens
                 })
               });
               if (retryRes.ok) {
@@ -2768,7 +2970,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                     { role: 'user', content: prompt }
                   ],
                   temperature: Math.max(0, Math.min(1.5, payload.temperature ?? 0.7)),
-                  max_tokens: 4096
+                  max_tokens: maxTokens
                 })
               });
               if (retryRes.ok) {
@@ -2792,12 +2994,11 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
 
       const data = await effectiveRes.json();
       const rawText = data.choices?.[0]?.message?.content || '[]';
-      let parsedQuestions: QuestionData[] = [];
       try {
         parsedQuestions = parseQuestionsJson(rawText);
       } catch (parseErr) {
         console.warn(`[Auto-Fallback Parse] ${provider} model ${effectiveTargetModel} menghasilkan format tidak terbaca. Mencoba model cadangan...`);
-        const fallbacks = PROVIDER_FALLBACK_MAP[provider] || [];
+        const fallbacks = (PROVIDER_FALLBACK_MAP as any)[provider] || [];
         for (const cand of fallbacks) {
           if (cand === effectiveTargetModel) continue;
           try {
@@ -2811,7 +3012,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                   { role: 'user', content: prompt }
                 ],
                 temperature: Math.max(0, Math.min(1.5, payload.temperature ?? 0.7)),
-                max_tokens: 4096
+                max_tokens: maxTokens
               })
             });
             if (retryRes.ok) {
@@ -2824,14 +3025,92 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                 break;
               }
             }
-          } catch {}
+          } catch { }
         }
         if (parsedQuestions.length === 0) {
           throw parseErr;
         }
       }
-      return { questions: parsedQuestions, modelUsed: effectiveTargetModel, provider };
+      effectiveUsedModel = effectiveTargetModel;
     }
+
+    // Auto-Top-Up: Pastikan jumlah soal tepat sesuai targetCount jika hasil kurang
+    if (parsedQuestions.length < targetCount && targetCount <= 35) {
+      const missing = targetCount - parsedQuestions.length;
+      console.info(`[Auto-Top-Up Client] Terkumpul ${parsedQuestions.length}/${targetCount} soal. Mengambil sisa ${missing} soal lagi...`);
+      try {
+        const topUpPayload = {
+          ...payload,
+          count: missing,
+          additionalInstructions: `SOAL LANJUTAN: Buatkan sisa ${missing} butir soal lanjutan dengan nomor urut mulai dari ${parsedQuestions.length + 1} sampai ${targetCount} untuk melengkapi paket soal. ${payload.additionalInstructions || ''}`
+        };
+        const topUpPrompt = buildQuestionsPrompt(topUpPayload);
+        let topUpRaw = '';
+
+        if (provider === 'gemini') {
+          const clean = effectiveUsedModel.trim().replace(/^models\//, '');
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(clean)}:generateContent?key=${apiKey}`;
+          const topUpRes = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: topUpPrompt }] }],
+              generationConfig: {
+                responseMimeType: 'application/json',
+                temperature: Math.max(0, Math.min(1, payload.temperature ?? 0.7)),
+                maxOutputTokens: 8192
+              }
+            })
+          });
+          if (topUpRes.ok) {
+            const topUpData = await topUpRes.json();
+            topUpRaw = topUpData.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          }
+        } else {
+          const baseUrl = (payload.customBaseUrl || providerConfig.defaultBaseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
+          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+          if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+          const topUpRes = await fetch(`${baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              model: effectiveUsedModel,
+              messages: [
+                { role: 'system', content: 'Anda adalah asisten pembuat soal ujian profesional berformat JSON. Wajib berikan output HANYA berupa array JSON soal [ ... ], tanpa teks lain dan tanpa kode pembungkus markdown.' },
+                { role: 'user', content: topUpPrompt }
+              ],
+              temperature: Math.max(0, Math.min(1.5, payload.temperature ?? 0.7)),
+              max_tokens: Math.min(8192, missing * 800)
+            })
+          });
+          if (topUpRes.ok) {
+            const topUpData = await topUpRes.json();
+            topUpRaw = topUpData.choices?.[0]?.message?.content || '';
+          }
+        }
+
+        if (topUpRaw) {
+          const topUpParsed = parseQuestionsJson(topUpRaw);
+          if (topUpParsed && topUpParsed.length > 0) {
+            parsedQuestions = [...parsedQuestions, ...topUpParsed];
+          }
+        }
+      } catch (topUpErr) {
+        console.warn('[Auto-Top-Up Client] Gagal top up:', topUpErr);
+      }
+    }
+
+    // Pastikan batas jumlah soal tepat sama dengan targetCount
+    if (parsedQuestions.length > targetCount) {
+      parsedQuestions = parsedQuestions.slice(0, targetCount);
+    }
+    // Rapikan penomoran urut 1 sampai targetCount
+    parsedQuestions = parsedQuestions.map((q, idx) => ({
+      ...q,
+      Nomor: idx + 1
+    }));
+
+    return { questions: parsedQuestions, modelUsed: effectiveUsedModel, provider };
   };
 
   const handleGenerate = async (e: React.FormEvent) => {
@@ -2922,11 +3201,42 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
       }
 
       const rawQuestions = Array.isArray(data.questions) ? data.questions : [];
-      const fixedQuestions = rawQuestions.map((q: QuestionData) => {
+      let consolidatedQuestions = rawQuestions;
+      const targetCount = Number(count) || 5;
+
+      // Double-guard: Jika hasil dari server kurang dari target dan client memiliki key
+      if (consolidatedQuestions.length < targetCount && (customApiKey || aiProvider === 'custom' || aiProvider === '9router')) {
+        const missing = targetCount - consolidatedQuestions.length;
+        console.warn(`[Auto-Top-Up Client Guard] Baru terkumpul ${consolidatedQuestions.length}/${targetCount} soal. Mengambil sisa ${missing} soal langsung via client...`);
+        try {
+          const topUpPayload = {
+            ...payload,
+            count: missing,
+            additionalInstructions: `SOAL LANJUTAN: Buatkan sisa ${missing} butir soal lanjutan dengan nomor urut mulai dari ${consolidatedQuestions.length + 1} sampai ${targetCount} untuk melengkapi paket soal. ${payload.additionalInstructions || ''}`
+          };
+          const topUpResult = await callAiClientSide(topUpPayload);
+          if (topUpResult && Array.isArray(topUpResult.questions) && topUpResult.questions.length > 0) {
+            consolidatedQuestions = [...consolidatedQuestions, ...topUpResult.questions];
+          }
+        } catch (e) {
+          console.warn('[Auto-Top-Up Client Guard] Gagal top up:', e);
+        }
+      }
+
+      // Pastikan jumlah persis sesuai targetCount jika berlebih
+      if (consolidatedQuestions.length > targetCount) {
+        consolidatedQuestions = consolidatedQuestions.slice(0, targetCount);
+      }
+      consolidatedQuestions = consolidatedQuestions.map((q: any, idx: number) => ({
+        ...q,
+        Nomor: idx + 1
+      }));
+
+      const fixedQuestions = consolidatedQuestions.map((q: QuestionData) => {
         return {
           ...q,
           Soal: preprocessMarkdown(q.Soal),
-          Isi_Referensi: preprocessMarkdown(q.Isi_Referensi),
+          Isi_Referensi: cleanStimulusText(preprocessMarkdown(q.Isi_Referensi)),
           Pilihan_A: preprocessMarkdown(q.Pilihan_A),
           Pilihan_B: preprocessMarkdown(q.Pilihan_B),
           Pilihan_C: preprocessMarkdown(q.Pilihan_C),
@@ -3552,8 +3862,8 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                     type="button"
                     onClick={() => setViewMode('card')}
                     className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-600 ${viewMode === 'card'
-                        ? 'bg-white text-indigo-700 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                      ? 'bg-white text-indigo-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
                       }`}
                     title="Tampilan Lembar Kartu Soal Lengkap"
                   >
@@ -3564,8 +3874,8 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                     type="button"
                     onClick={() => setViewMode('table')}
                     className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-600 ${viewMode === 'table'
-                        ? 'bg-white text-indigo-700 shadow-xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                      ? 'bg-white text-indigo-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
                       }`}
                     title="Tampilan Tabel Ringkas"
                   >
@@ -3644,8 +3954,8 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                     type="button"
                     onClick={() => setFilterType('all')}
                     className={`px-2.5 py-1 rounded-md text-xs font-semibold whitespace-nowrap transition cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-600 ${filterType === 'all'
-                        ? 'bg-slate-800 text-white'
-                        : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                      ? 'bg-slate-800 text-white'
+                      : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
                       }`}
                   >
                     Semua ({safeQuestions.length})
@@ -3658,8 +3968,8 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                         type="button"
                         onClick={() => setFilterType(t)}
                         className={`px-2.5 py-1 rounded-md text-xs font-semibold whitespace-nowrap transition cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-600 ${filterType === t
-                            ? 'bg-indigo-600 text-white'
-                            : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
                           }`}
                       >
                         {t} ({count})
@@ -3761,10 +4071,10 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                                 {q.Nomor || originalIndex + 1}
                               </span>
                               <span className={`text-xs px-2.5 py-1 rounded-md font-semibold border ${q.Jenis_Soal === 'PG' ? 'bg-blue-50 text-blue-900 border-blue-200' :
-                                  q.Jenis_Soal === 'PGK' ? 'bg-indigo-50 text-indigo-900 border-indigo-200' :
-                                    q.Jenis_Soal === 'ESSAY' ? 'bg-purple-50 text-purple-900 border-purple-200' :
-                                      q.Jenis_Soal === 'PILIHAN ESSAY' ? 'bg-teal-50 text-teal-900 border-teal-200' :
-                                        'bg-amber-50 text-amber-900 border-amber-200'
+                                q.Jenis_Soal === 'PGK' ? 'bg-indigo-50 text-indigo-900 border-indigo-200' :
+                                  q.Jenis_Soal === 'ESSAY' ? 'bg-purple-50 text-purple-900 border-purple-200' :
+                                    q.Jenis_Soal === 'PILIHAN ESSAY' ? 'bg-teal-50 text-teal-900 border-teal-200' :
+                                      'bg-amber-50 text-amber-900 border-amber-200'
                                 }`}>
                                 {q.Jenis_Soal}
                               </span>
@@ -3847,13 +4157,13 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                                       <div
                                         key={opt.key}
                                         className={`flex items-start gap-3 p-3 rounded-xl border transition-all ${isCorrect
-                                            ? 'bg-emerald-50/80 border-emerald-300 ring-1 ring-emerald-400/30'
-                                            : 'bg-slate-50/60 border-slate-200 hover:bg-slate-50'
+                                          ? 'bg-emerald-50/80 border-emerald-300 ring-1 ring-emerald-400/30'
+                                          : 'bg-slate-50/60 border-slate-200 hover:bg-slate-50'
                                           }`}
                                       >
                                         <span className={`w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-lg text-xs font-bold ${isCorrect
-                                            ? 'bg-emerald-600 text-white shadow-xs'
-                                            : 'bg-white text-slate-700 border border-slate-300'
+                                          ? 'bg-emerald-600 text-white shadow-xs'
+                                          : 'bg-white text-slate-700 border border-slate-300'
                                           }`}>
                                           {opt.key}
                                         </span>
@@ -3936,10 +4246,10 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                             </td>
                             <td className="p-3 border-r border-slate-100 align-top text-center">
                               <span className={`inline-flex items-center px-2 py-1 rounded-md text-xs font-semibold border ${q.Jenis_Soal === 'PG' ? 'bg-blue-50 text-blue-900 border-blue-200' :
-                                  q.Jenis_Soal === 'PGK' ? 'bg-indigo-50 text-indigo-900 border-indigo-200' :
-                                    q.Jenis_Soal === 'ESSAY' ? 'bg-purple-50 text-purple-900 border-purple-200' :
-                                      q.Jenis_Soal === 'PILIHAN ESSAY' ? 'bg-teal-50 text-teal-900 border-teal-200' :
-                                        'bg-slate-100 text-slate-800 border-slate-200'
+                                q.Jenis_Soal === 'PGK' ? 'bg-indigo-50 text-indigo-900 border-indigo-200' :
+                                  q.Jenis_Soal === 'ESSAY' ? 'bg-purple-50 text-purple-900 border-purple-200' :
+                                    q.Jenis_Soal === 'PILIHAN ESSAY' ? 'bg-teal-50 text-teal-900 border-teal-200' :
+                                      'bg-slate-100 text-slate-800 border-slate-200'
                                 }`}>
                                 {q.Jenis_Soal}
                               </span>
@@ -4081,8 +4391,8 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                         type="button"
                         onClick={() => handleSelectProvider(prov.id)}
                         className={`text-center py-3 px-3 rounded-xl border transition-all flex items-center justify-center cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 ${isSelected
-                            ? 'border-indigo-600 bg-indigo-50/80 shadow-xs ring-2 ring-indigo-500/20 text-indigo-900 font-bold'
-                            : 'border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-medium'
+                          ? 'border-indigo-600 bg-indigo-50/80 shadow-xs ring-2 ring-indigo-500/20 text-indigo-900 font-bold'
+                          : 'border-slate-200 hover:border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-medium'
                           }`}
                       >
                         <span className="text-xs sm:text-sm font-semibold truncate">
@@ -4183,8 +4493,8 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                       setIsCustomModelName(false);
                     }}
                     className={`text-xs px-2.5 py-1 rounded-lg border font-medium transition-all flex items-center gap-1.5 cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-600 ${customModel === 'auto'
-                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs font-semibold'
-                        : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs font-semibold'
+                      : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-50'
                       }`}
                   >
                     <span>Otomatis {currentActiveModels[0] ? `(${currentActiveModels[0].id})` : ''}</span>
@@ -4199,8 +4509,8 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                         setIsCustomModelName(false);
                       }}
                       className={`text-xs px-2.5 py-1 rounded-lg border font-medium transition-all flex items-center gap-1.5 cursor-pointer font-mono focus-visible:ring-2 focus-visible:ring-indigo-600 ${customModel === m.id && !isCustomModelName
-                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs font-semibold'
-                          : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs font-semibold'
+                        : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-50'
                         }`}
                       title={`Pilih model ${m.id}`}
                     >
@@ -4565,7 +4875,7 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                             const clean = raw.map((q: QuestionData) => ({
                               ...q,
                               Soal: preprocessMarkdown(q.Soal),
-                              Isi_Referensi: preprocessMarkdown(q.Isi_Referensi),
+                              Isi_Referensi: cleanStimulusText(preprocessMarkdown(q.Isi_Referensi)),
                               Pilihan_A: preprocessMarkdown(q.Pilihan_A),
                               Pilihan_B: preprocessMarkdown(q.Pilihan_B),
                               Pilihan_C: preprocessMarkdown(q.Pilihan_C),
@@ -4673,8 +4983,8 @@ PENTING: Output Anda HARUS langsung diawali karakter '[' dan diakhiri ']'. HANYA
                         <div
                           key={opt}
                           className={`p-3 rounded-lg border flex items-start gap-3 transition-colors ${isCorrect
-                              ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-medium'
-                              : 'bg-white border-slate-200 text-slate-700'
+                            ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-medium'
+                            : 'bg-white border-slate-200 text-slate-700'
                             }`}
                         >
                           <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${isCorrect ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-600'
