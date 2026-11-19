@@ -38,19 +38,29 @@ import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import { playSuccessSound } from './assets/sound';
 
+// Helper untuk encoding URL QuickChart yang 100% aman dari karakter markdown () dan karakter khusus URL
+export function safeEncodeQuickChartConfig(config: any): string {
+  const jsonStr = typeof config === 'string' ? config : JSON.stringify(config);
+  return encodeURIComponent(jsonStr)
+    .replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
 // --- Bulletproof QuickChart Normalizer & Healer ---
-function normalizeQuickChartInText(text: string): string {
+export function normalizeQuickChartInText(text: string): string {
   if (!text || typeof text !== 'string') return text;
   if (!text.toLowerCase().includes('quickchart.io')) return text;
 
   let s = text;
 
-  // Clean up corrupted duplicate QuickChart where a truncated prefix was joined with ](https://quickchart.io...
+  // 1. Bersihkan smart quotes yang sering merusak parsing JSON dari AI
+  s = s.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+
+  // 2. Bersihkan duplicate / broken markdown prefix yang terpotong
   s = s.replace(/!\[([^\]]*)\]\([^)\n]*?quickchart\.io\/chart[^\n]*?\]\((https?:\/\/quickchart\.io\/chart\?)/gi, '![$1]($2');
   s = s.replace(/!\[([^\]]*)\]\(\s*\[\s*(https?:\/\/quickchart\.io)/gi, '![$1]($2');
   s = s.replace(/\\\[/g, '[').replace(/\\\]/g, ']').replace(/\\\(/g, '(').replace(/\\\)/g, ')');
 
-  // 2. Iterate and normalize every QuickChart instance
+  // 3. Iterasi dan normalisasi setiap kemunculan QuickChart
   let searchIdx = 0;
   let loopCount = 0;
   while (searchIdx < s.length && loopCount < 50) {
@@ -58,7 +68,7 @@ function normalizeQuickChartInText(text: string): string {
     const qcIdx = s.toLowerCase().indexOf('quickchart.io/chart', searchIdx);
     if (qcIdx === -1) break;
 
-    // Check backwards to find where this image markdown / link / tag started
+    // Temukan awal sintaks gambar Markdown ![alt]( atau link http
     let replaceStart = qcIdx;
     let alt = 'Grafik';
 
@@ -77,18 +87,7 @@ function normalizeQuickChartInText(text: string): string {
       }
     }
 
-    // Check if preceded by an unclosed/broken earlier QuickChart tag (e.g. truncated markdown block)
-    const lookback = s.substring(Math.max(0, replaceStart - 2000), replaceStart);
-    const brokenMatch = lookback.match(/!\[([^\]]*)\]\(\s*\[?\s*https?:\/\/[^)\n]*?quickchart\.io[^)\n]*?$/i);
-    if (brokenMatch) {
-      alt = brokenMatch[1]?.trim() || alt;
-      const lastMd = lookback.lastIndexOf('![');
-      if (lastMd !== -1) {
-        replaceStart = Math.max(0, replaceStart - 2000) + lastMd;
-      }
-    }
-
-    // Locate c= or chart= parameter
+    // Temukan parameter c= atau chart=
     const afterQc = s.substring(qcIdx);
     const cMatch = afterQc.match(/[?&](?:c|chart)=/i);
     if (!cMatch || cMatch.index === undefined) {
@@ -99,7 +98,7 @@ function normalizeQuickChartInText(text: string): string {
     const cValueStart = qcIdx + cMatch.index + cMatch[0].length;
     const lookahead = s.substring(cValueStart, cValueStart + 8000);
 
-    // Multi-pass URL decode
+    // Multi-pass URL decode untuk mendapatkan konfigurasi teks mentah
     let decoded = lookahead;
     for (let d = 0; d < 3; d++) {
       if (decoded.includes('%')) {
@@ -110,6 +109,7 @@ function normalizeQuickChartInText(text: string): string {
             .replace(/%7B/gi, '{')
             .replace(/%7D/gi, '}')
             .replace(/%22/gi, '"')
+            .replace(/%27/gi, "'")
             .replace(/%3A/gi, ':')
             .replace(/%2C/gi, ',')
             .replace(/%5B/gi, '[')
@@ -127,7 +127,7 @@ function normalizeQuickChartInText(text: string): string {
       continue;
     }
 
-    // Find the end of JSON by tracking brace depth
+    // Cari akhir objek JSON dengan melacak kedalaman kurung kurawal
     let depth = 0;
     let inString = false;
     let quoteChar = '';
@@ -164,43 +164,56 @@ function normalizeQuickChartInText(text: string): string {
       }
     }
 
-    if (jsonEndPos === -1) {
-      searchIdx = qcIdx + 20;
-      continue;
+    let jsonStr = '';
+    if (jsonEndPos !== -1) {
+      jsonStr = decoded.substring(firstBrace, jsonEndPos + 1);
+    } else {
+      const lastBrace = decoded.lastIndexOf('}');
+      if (lastBrace > firstBrace) {
+        jsonStr = decoded.substring(firstBrace, lastBrace + 1);
+      }
     }
 
-    const jsonStr = decoded.substring(firstBrace, jsonEndPos + 1);
     let parsedConfig: any = null;
 
-    try {
-      parsedConfig = JSON.parse(jsonStr);
-    } catch {
+    if (jsonStr) {
+      // 1. Coba JSON.parse standar
       try {
-        const relaxed = jsonStr
-          .replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
-          .replace(/'([^']*)'/g, '"$1"')
-          .replace(/,\s*([}\]])/g, '$1');
-        parsedConfig = JSON.parse(relaxed);
-      } catch { }
+        parsedConfig = JSON.parse(jsonStr);
+      } catch {
+        // 2. Coba relaxed JSON (mengutip properti tanpa kutip & kutip satu)
+        try {
+          const relaxed = jsonStr
+            .replace(/([{,]\s*)([a-zA-Z0-9_$]+)\s*:/g, '$1"$2":')
+            .replace(/'([^']*)'/g, '"$1"')
+            .replace(/,\s*([}\]])/g, '$1');
+          parsedConfig = JSON.parse(relaxed);
+        } catch { }
+      }
     }
 
-    // Fallback regex extraction if JSON still not valid
-    if (!parsedConfig || !parsedConfig.data) {
-      const lm = jsonStr.match(/labels\s*:\s*\[(.*?)\]/s);
-      const dm = jsonStr.match(/data\s*:\s*\[(.*?)\]/s);
+    // 3. Fallback ekstraksi regex jika JSON masih belum valid
+    if (!parsedConfig || !parsedConfig.data || !Array.isArray(parsedConfig.data.labels)) {
+      const searchTarget = jsonStr || decoded;
+      const lm = searchTarget.match(/labels\s*:\s*\[(.*?)\]/s);
+      const dm = searchTarget.match(/data\s*:\s*\[(.*?)\]/s);
       if (lm && dm) {
         const rLabels = lm[1].split(',').map(x => x.replace(/['"\\]/g, '').trim()).filter(Boolean);
-        const rData = dm[1].split(',').map(x => Number(x.trim()) || 0);
-        const tm = jsonStr.match(/type\s*:\s*['"]?([a-zA-Z]+)/);
-        const isH = jsonStr.includes('indexAxis') && (jsonStr.includes("'y'") || jsonStr.includes('"y"'));
+        const rData = dm[1].split(',').map(x => {
+          const num = Number(x.replace(/['"\\]/g, '').trim());
+          return isNaN(num) ? 0 : num;
+        });
+        const tm = searchTarget.match(/type\s*:\s*['"]?([a-zA-Z]+)/);
+        const isH = searchTarget.includes('indexAxis') && (searchTarget.includes("'y'") || searchTarget.includes('"y"'));
         parsedConfig = {
-          type: tm ? tm[1] : 'bar',
+          type: tm ? tm[1].toLowerCase() : 'bar',
           data: {
-            labels: rLabels,
-            datasets: [{ label: alt, data: rData }]
+            labels: rLabels.length > 0 ? rLabels : ['Kategori 1', 'Kategori 2'],
+            datasets: [{ label: alt || 'Nilai', data: rData }]
           },
           options: {
-            indexAxis: isH ? 'y' : 'x'
+            indexAxis: isH ? 'y' : 'x',
+            responsive: true
           }
         };
       }
@@ -211,48 +224,64 @@ function normalizeQuickChartInText(text: string): string {
       continue;
     }
 
-    // Calculate replaceEnd in original string s
-    const totalClosingBraces = (jsonStr.match(/\}/g) || []).length;
-    let bracesCount = 0;
+    // Pastikan angka dalam data adalah numeric murni (mencegah error token di QuickChart)
+    if (Array.isArray(parsedConfig.data.datasets)) {
+      parsedConfig.data.datasets.forEach((ds: any) => {
+        if (Array.isArray(ds.data)) {
+          ds.data = ds.data.map((v: any) => {
+            const n = typeof v === 'number' ? v : Number(v);
+            return isNaN(n) ? 0 : n;
+          });
+        }
+        if (ds.label) {
+          ds.label = String(ds.label).replace(/[\]\)\}\\]+$/, '').trim();
+        }
+      });
+    }
+    if (Array.isArray(parsedConfig.data.labels)) {
+      parsedConfig.data.labels = parsedConfig.data.labels.map((lbl: any) => String(lbl).trim());
+    }
+
+    // Bersihkan judul dari sisa tag markdown
+    if (parsedConfig.options?.title?.text) {
+      parsedConfig.options.title.text = String(parsedConfig.options.title.text).replace(/\]\(https?:.*$/i, '').trim();
+    }
+    if (parsedConfig.options?.plugins?.title?.text) {
+      parsedConfig.options.plugins.title.text = String(parsedConfig.options.plugins.title.text).replace(/\]\(https?:.*$/i, '').trim();
+    }
+
+    // Hitung posisi replaceEnd pada string asli s
     let replaceEnd = cValueStart;
-    let pos = cValueStart;
-
-    while (pos < s.length) {
-      if (s[pos] === '}') {
-        bracesCount++;
-        if (bracesCount === totalClosingBraces) {
-          replaceEnd = pos + 1;
-          break;
+    const closingParenIdx = s.indexOf(')', cValueStart);
+    if (closingParenIdx !== -1) {
+      replaceEnd = closingParenIdx + 1;
+    } else {
+      const totalClosingBraces = (jsonStr.match(/\}/g) || []).length || 1;
+      let bracesCount = 0;
+      let pos = cValueStart;
+      while (pos < s.length) {
+        if (s[pos] === '}') {
+          bracesCount++;
+          if (bracesCount >= totalClosingBraces) {
+            replaceEnd = pos + 1;
+            break;
+          }
+        } else if (s.substring(pos, pos + 3).toLowerCase() === '%7d') {
+          bracesCount++;
+          if (bracesCount >= totalClosingBraces) {
+            replaceEnd = pos + 3;
+            break;
+          }
+          pos += 2;
         }
-      } else if (s.substring(pos, pos + 3).toLowerCase() === '%7d') {
-        bracesCount++;
-        if (bracesCount === totalClosingBraces) {
-          replaceEnd = pos + 3;
-          break;
-        }
-        pos += 2;
+        pos++;
       }
-      pos++;
-    }
-
-    // Consume trailing query params (&bkg=white etc.) and closing syntax
-    while (replaceEnd < s.length) {
-      const ch = s[replaceEnd];
-      if (ch === '&') {
-        const nextAmp = s.indexOf('&', replaceEnd + 1);
-        const nextParen = s.indexOf(')', replaceEnd + 1);
-        const endParam = (nextParen !== -1 && (nextAmp === -1 || nextParen < nextAmp)) ? nextParen : (nextAmp !== -1 ? nextAmp : replaceEnd + 1);
-        replaceEnd = endParam;
-      } else if (ch === ')' || ch === ']' || ch === '"' || ch === '>') {
+      if (replaceEnd < s.length && s[replaceEnd] === ')') {
         replaceEnd++;
-      } else if (ch === ' ' || ch === '\t') {
-        replaceEnd++;
-      } else {
-        break;
       }
     }
 
-    // Check for immediately following duplicate or fragmented link
+    // Periksa apakah ada pecahan duplikat link markdown tepat di belakang
     const followChunk = s.substring(replaceEnd, replaceEnd + 120);
     const dupMatch = followChunk.match(/^\s*\]\(https?:\/\/quickchart\.io\/chart\?/i);
     if (dupMatch) {
@@ -262,17 +291,8 @@ function normalizeQuickChartInText(text: string): string {
       }
     }
 
-    // Clean up title/label in config from leftover markdown syntax
-    if (parsedConfig.options?.plugins?.title?.text) {
-      parsedConfig.options.plugins.title.text = String(parsedConfig.options.plugins.title.text)
-        .replace(/\]\(https?:.*$/i, '')
-        .replace(/\)+$/, '')
-        .trim();
-    }
-
-    // Construct canonical, 100% encoded QuickChart Markdown image
-    const cleanConfigJson = JSON.stringify(parsedConfig);
-    const encodedConfig = encodeURIComponent(cleanConfigJson);
+    // Gunakan safeEncodeQuickChartConfig agar kurung () di-encode menjadi %28 dan %29
+    const encodedConfig = safeEncodeQuickChartConfig(parsedConfig);
     const cleanUrl = `https://quickchart.io/chart?bkg=white&w=500&h=300&format=png&c=${encodedConfig}`;
     const replacement = `![${alt}](${cleanUrl})`;
 
@@ -283,11 +303,14 @@ function normalizeQuickChartInText(text: string): string {
   return s;
 }
 
-function sanitizeQuickChartUrl(rawUrl: string): string {
+export function sanitizeQuickChartUrl(rawUrl: string): string {
+  if (!rawUrl || typeof rawUrl !== 'string') return rawUrl;
   try {
     const norm = normalizeQuickChartInText(`![Grafik](${rawUrl})`);
-    const match = norm.match(/!\[.*?\]\((.+?)\)/);
-    return match ? match[1] : rawUrl;
+    const match = norm.match(/!\[.*?\]\((https?:\/\/[^\n\r]+?)\)(?:\s|$|\))/);
+    if (match) return match[1];
+    const match2 = norm.match(/!\[.*?\]\((.+?)\)/);
+    return match2 ? match2[1] : rawUrl;
   } catch {
     return rawUrl;
   }
@@ -2696,7 +2719,7 @@ ${payload.studentMisconception ? '\n- WAJIB Miskonsepsi Siswa: Rancang pengecoh 
 ${payload.noExtraExplanation ? '\n- DILARANG Penjelasan Ekstra di Pilihan: Pada pilihan opsi jawaban, tuliskan HANYA poin jawaban inti tanpa menambahkan kata "karena" atau alasan di dalam teks opsi.' : ''}
 ${payload.supportEquation ? '\n- WAJIB sertakan soal yang mengandung RUMUS (Equation) matematika/fisika/kimia dengan LaTeX ($...$ atau $$...$$).' : '\n- DILARANG menggunakan RUMUS (Equation) LaTeX.'}
 ${payload.supportImage ? '\n- WAJIB sertakan GAMBAR ilustrasi pada 1 sampai 2 soal menggunakan markdown: ![deskripsi](https://image.pollinations.ai/prompt/detailed-description-in-english?width=400&height=300&nologo=true).' : '\n- DILARANG menyertakan GAMBAR/ilustrasi markdown.'}
-${payload.supportGraph ? '\n- WAJIB sertakan soal dengan analisis GRAFIK menggunakan QuickChart valid: ![Grafik](https://quickchart.io/chart?bkg=white&w=500&h=300&c={...}). Dilarang memakai tanda kurung () di label chart.' : '\n- DILARANG membuat soal berbasis grafik.'}
+${payload.supportGraph ? '\n- WAJIB sertakan soal dengan analisis GRAFIK menggunakan QuickChart valid dalam format markdown: ![Grafik](https://quickchart.io/chart?bkg=white&w=500&h=300&format=png&c={type:\'bar\',data:{labels:[\'A\',\'B\',\'C\'],datasets:[{label:\'Nilai\',data:[30,50,80]}]}}). Pastikan nilai data berupa angka murni dan DILARANG memakai tanda kurung () di dalam label atau judul chart.' : '\n- DILARANG membuat soal berbasis grafik.'}
 ${payload.supportDiagram ? '\n- WAJIB sertakan soal dengan DIAGRAM siklus/alur proses menggunakan blok ```mermaid ... ``` atau markdown ![Diagram](https://mermaid.ink/img/...).' : '\n- DILARANG membuat soal berbasis diagram.'}
 ${payload.additionalInstructions ? `\n=== INSTRUKSI KHUSUS TAMBAHAN ===\n${payload.additionalInstructions}` : ''}
 
@@ -3294,8 +3317,21 @@ Format setiap objek soal dalam array:
       str = str.replace(/\$(.*?)\$/g, (_, math) => {
         return `<img src="https://i.upmath.me/png/${encodeURIComponent(math.trim())}" />`;
       });
+      // Ganti markdown image dengan tag <img> HTML untuk template CBT Pijar
+      // Tangani URL QuickChart secara khusus agar tidak terpotong jika ada kurung di label
+      str = str.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|\/|\.)[^\r\n]+?)\)(?=\s|$|[.,:;!\?\)\]\}])/g, (_, alt, rawUrl) => {
+        let cleanUrl = rawUrl.trim();
+        if (cleanUrl.toLowerCase().includes('quickchart.io')) {
+          cleanUrl = sanitizeQuickChartUrl(cleanUrl);
+        }
+        return `<img src="${cleanUrl}" />`;
+      });
       str = str.replace(/!\[.*?\]\((.+?)\)/g, (_, url) => {
-        return `<img src="${url.trim()}" />`;
+        let cleanUrl = url.trim();
+        if (cleanUrl.toLowerCase().includes('quickchart.io')) {
+          cleanUrl = sanitizeQuickChartUrl(cleanUrl);
+        }
+        return `<img src="${cleanUrl}" />`;
       });
       return str;
     };
@@ -3359,14 +3395,39 @@ Format setiap objek soal dalam array:
       texts.forEach(rawText => {
         if (!rawText) return;
         const text = preprocessMarkdown(rawText);
-        const regex = /!\[.*?\]\((.+?)\)/g;
+        const foundUrls = new Set<string>();
+
+        // Regex utama dengan batas karakter Markdown yang aman (tidak terpotong oleh kurung di dalam URL)
+        const regex = /!\[([^\]]*)\]\(((?:https?:\/\/|\/|\.)[^\r\n]+?)\)(?=\s|$|[.,:;!\?\)\]\}])/g;
         let match;
         while ((match = regex.exec(text)) !== null) {
-          const url = match[1].trim();
-          let ext = 'png';
-          if (url.includes('.jpeg') || url.includes('.jpg')) ext = 'jpg';
-          imageUrls.push({ url, name: `grafik-soal-${idx + 1}-${imageCounter}.${ext}` });
-          imageCounter++;
+          let url = match[2].trim();
+          if (url.toLowerCase().includes('quickchart.io')) {
+            url = sanitizeQuickChartUrl(url);
+          }
+          if (!foundUrls.has(url)) {
+            foundUrls.add(url);
+            let ext = 'png';
+            if (url.includes('.jpeg') || url.includes('.jpg')) ext = 'jpg';
+            imageUrls.push({ url, name: `grafik-soal-${idx + 1}-${imageCounter}.${ext}` });
+            imageCounter++;
+          }
+        }
+
+        // Fallback untuk mencakup format markdown gambar lainnya
+        const fallbackRegex = /!\[.*?\]\((.+?)\)/g;
+        while ((match = fallbackRegex.exec(text)) !== null) {
+          let url = match[1].trim();
+          if (url.toLowerCase().includes('quickchart.io')) {
+            url = sanitizeQuickChartUrl(url);
+          }
+          if (!foundUrls.has(url)) {
+            foundUrls.add(url);
+            let ext = 'png';
+            if (url.includes('.jpeg') || url.includes('.jpg')) ext = 'jpg';
+            imageUrls.push({ url, name: `grafik-soal-${idx + 1}-${imageCounter}.${ext}` });
+            imageCounter++;
+          }
         }
       });
     });
@@ -3385,6 +3446,10 @@ Format setiap objek soal dalam array:
           const cachedBlobUrl = isPollinationsUrl(img.url) ? pollinationsQueue.getCachedBlobUrl(img.url) : undefined;
           const fetchTarget = cachedBlobUrl || img.url;
           const response = await fetch(fetchTarget);
+          if (!response.ok) {
+            console.warn(`[DownloadGrafik] Gagal fetch gambar: HTTP ${response.status} (${img.url})`);
+            return;
+          }
           const blob = await response.blob();
           zip.file(img.name, blob);
         } catch (e) {

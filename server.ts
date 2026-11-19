@@ -237,42 +237,252 @@ app.post("/api/models", async (req, res) => {
   }
 });
 
-function normalizeQuestionObject(raw: any, index: number) {
-  if (!raw || typeof raw !== 'object') {
-    return {
-      Nomor: index + 1,
-      Jenis_Soal: 'PG',
-      Nilai: 10,
-      Nama_Materi: '',
-      Judul_Referensi: '',
-      Isi_Referensi: '',
-      Soal: String(raw || ''),
-      File_Audio_Video: '',
-      Pilihan_A: '',
-      Pilihan_B: '',
-      Pilihan_C: '',
-      Pilihan_D: '',
-      Kunci_Jawaban_Non_Essay: '',
-      Jawaban_Essay: ''
-    };
+// Helper untuk encoding URL QuickChart yang 100% aman dari karakter markdown () dan karakter khusus URL
+function safeEncodeQuickChartConfig(config: any): string {
+  const jsonStr = typeof config === 'string' ? config : JSON.stringify(config);
+  return encodeURIComponent(jsonStr)
+    .replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
+// Helper untuk menormalkan dan memperbaiki format grafik QuickChart.io
+function normalizeQuickChartInText(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  if (!text.toLowerCase().includes('quickchart.io')) return text;
+
+  let s = text;
+  s = s.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'");
+  s = s.replace(/!\[([^\]]*)\]\([^)\n]*?quickchart\.io\/chart[^\n]*?\]\((https?:\/\/quickchart\.io\/chart\?)/gi, '![$1]($2');
+  s = s.replace(/!\[([^\]]*)\]\(\s*\[\s*(https?:\/\/quickchart\.io)/gi, '![$1]($2');
+  s = s.replace(/\\\[/g, '[').replace(/\\\]/g, ']').replace(/\\\(/g, '(').replace(/\\\)/g, ')');
+
+  let searchIdx = 0;
+  let loopCount = 0;
+  while (searchIdx < s.length && loopCount < 50) {
+    loopCount++;
+    const qcIdx = s.toLowerCase().indexOf('quickchart.io/chart', searchIdx);
+    if (qcIdx === -1) break;
+
+    let replaceStart = qcIdx;
+    let alt = 'Grafik';
+
+    const beforeSub = s.substring(Math.max(0, qcIdx - 200), qcIdx);
+    const mdImgMatch = beforeSub.match(/!\[([^\]]*)\]\(\s*\[?\s*(https?:\/\/)?$/i);
+    if (mdImgMatch) {
+      alt = mdImgMatch[1]?.trim() || 'Grafik';
+      const offset = beforeSub.lastIndexOf('![');
+      if (offset !== -1) {
+        replaceStart = Math.max(0, qcIdx - 200) + offset;
+      }
+    } else {
+      const httpIdx = s.lastIndexOf('http', qcIdx);
+      if (httpIdx !== -1 && qcIdx - httpIdx <= 8) {
+        replaceStart = httpIdx;
+      }
+    }
+
+    const afterQc = s.substring(qcIdx);
+    const cMatch = afterQc.match(/[?&](?:c|chart)=/i);
+    if (!cMatch || cMatch.index === undefined) {
+      searchIdx = qcIdx + 20;
+      continue;
+    }
+
+    const cValueStart = qcIdx + cMatch.index + cMatch[0].length;
+    const lookahead = s.substring(cValueStart, cValueStart + 8000);
+
+    let decoded = lookahead;
+    for (let d = 0; d < 3; d++) {
+      if (decoded.includes('%')) {
+        try {
+          decoded = decodeURIComponent(decoded);
+        } catch {
+          decoded = decoded
+            .replace(/%7B/gi, '{')
+            .replace(/%7D/gi, '}')
+            .replace(/%22/gi, '"')
+            .replace(/%27/gi, "'")
+            .replace(/%3A/gi, ':')
+            .replace(/%2C/gi, ',')
+            .replace(/%5B/gi, '[')
+            .replace(/%5D/gi, ']')
+            .replace(/%20/gi, ' ')
+            .replace(/%28/gi, '(')
+            .replace(/%29/gi, ')');
+        }
+      }
+    }
+
+    const firstBrace = decoded.indexOf('{');
+    if (firstBrace === -1) {
+      searchIdx = qcIdx + 20;
+      continue;
+    }
+
+    let depth = 0;
+    let inString = false;
+    let quoteChar = '';
+    let isEscaped = false;
+    let jsonEndPos = -1;
+
+    for (let i = firstBrace; i < decoded.length; i++) {
+      const ch = decoded[i];
+      if (isEscaped) {
+        isEscaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        isEscaped = true;
+        continue;
+      }
+      if (inString) {
+        if (ch === quoteChar) {
+          inString = false;
+        }
+      } else {
+        if (ch === '"' || ch === "'") {
+          inString = true;
+          quoteChar = ch;
+        } else if (ch === '{') {
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            jsonEndPos = i;
+            break;
+          }
+        }
+      }
+    }
+
+    let jsonStr = '';
+    if (jsonEndPos !== -1) {
+      jsonStr = decoded.substring(firstBrace, jsonEndPos + 1);
+    } else {
+      const lastBrace = decoded.lastIndexOf('}');
+      if (lastBrace > firstBrace) {
+        jsonStr = decoded.substring(firstBrace, lastBrace + 1);
+      }
+    }
+
+    let parsedConfig: any = null;
+    if (jsonStr) {
+      try {
+        parsedConfig = JSON.parse(jsonStr);
+      } catch {
+        try {
+          const relaxed = jsonStr
+            .replace(/([{,]\s*)([a-zA-Z0-9_$]+)\s*:/g, '$1"$2":')
+            .replace(/'([^']*)'/g, '"$1"')
+            .replace(/,\s*([}\]])/g, '$1');
+          parsedConfig = JSON.parse(relaxed);
+        } catch { }
+      }
+    }
+
+    if (!parsedConfig || !parsedConfig.data || !Array.isArray(parsedConfig.data.labels)) {
+      const searchTarget = jsonStr || decoded;
+      const lm = searchTarget.match(/labels\s*:\s*\[(.*?)\]/s);
+      const dm = searchTarget.match(/data\s*:\s*\[(.*?)\]/s);
+      if (lm && dm) {
+        const rLabels = lm[1].split(',').map(x => x.replace(/['"\\]/g, '').trim()).filter(Boolean);
+        const rData = dm[1].split(',').map(x => {
+          const num = Number(x.replace(/['"\\]/g, '').trim());
+          return isNaN(num) ? 0 : num;
+        });
+        const tm = searchTarget.match(/type\s*:\s*['"]?([a-zA-Z]+)/);
+        const isH = searchTarget.includes('indexAxis') && (searchTarget.includes("'y'") || searchTarget.includes('"y"'));
+        parsedConfig = {
+          type: tm ? tm[1].toLowerCase() : 'bar',
+          data: {
+            labels: rLabels.length > 0 ? rLabels : ['Kategori 1', 'Kategori 2'],
+            datasets: [{ label: alt || 'Nilai', data: rData }]
+          },
+          options: {
+            indexAxis: isH ? 'y' : 'x',
+            responsive: true
+          }
+        };
+      }
+    }
+
+    if (!parsedConfig || !parsedConfig.data) {
+      searchIdx = qcIdx + 20;
+      continue;
+    }
+
+    if (Array.isArray(parsedConfig.data.datasets)) {
+      parsedConfig.data.datasets.forEach((ds: any) => {
+        if (Array.isArray(ds.data)) {
+          ds.data = ds.data.map((v: any) => {
+            const n = typeof v === 'number' ? v : Number(v);
+            return isNaN(n) ? 0 : n;
+          });
+        }
+        if (ds.label) {
+          ds.label = String(ds.label).replace(/[\]\)\}\\]+$/, '').trim();
+        }
+      });
+    }
+    if (Array.isArray(parsedConfig.data.labels)) {
+      parsedConfig.data.labels = parsedConfig.data.labels.map((lbl: any) => String(lbl).trim());
+    }
+
+    if (parsedConfig.options?.title?.text) {
+      parsedConfig.options.title.text = String(parsedConfig.options.title.text).replace(/\]\(https?:.*$/i, '').trim();
+    }
+    if (parsedConfig.options?.plugins?.title?.text) {
+      parsedConfig.options.plugins.title.text = String(parsedConfig.options.plugins.title.text).replace(/\]\(https?:.*$/i, '').trim();
+    }
+
+    let replaceEnd = cValueStart;
+    const closingParenIdx = s.indexOf(')', cValueStart);
+    if (closingParenIdx !== -1) {
+      replaceEnd = closingParenIdx + 1;
+    } else {
+      const totalClosingBraces = (jsonStr.match(/\}/g) || []).length || 1;
+      let bracesCount = 0;
+      let pos = cValueStart;
+      while (pos < s.length) {
+        if (s[pos] === '}') {
+          bracesCount++;
+          if (bracesCount >= totalClosingBraces) {
+            replaceEnd = pos + 1;
+            break;
+          }
+        } else if (s.substring(pos, pos + 3).toLowerCase() === '%7d') {
+          bracesCount++;
+          if (bracesCount >= totalClosingBraces) {
+            replaceEnd = pos + 3;
+            break;
+          }
+          pos += 2;
+        }
+        pos++;
+      }
+      if (replaceEnd < s.length && s[replaceEnd] === ')') {
+        replaceEnd++;
+      }
+    }
+
+    const followChunk = s.substring(replaceEnd, replaceEnd + 120);
+    const dupMatch = followChunk.match(/^\s*\]\(https?:\/\/quickchart\.io\/chart\?/i);
+    if (dupMatch) {
+      const dupParen = s.indexOf(')', replaceEnd + dupMatch[0].length);
+      if (dupParen !== -1) {
+        replaceEnd = dupParen + 1;
+      }
+    }
+
+    const encodedConfig = safeEncodeQuickChartConfig(parsedConfig);
+    const cleanUrl = `https://quickchart.io/chart?bkg=white&w=500&h=300&format=png&c=${encodedConfig}`;
+    const replacement = `![${alt}](${cleanUrl})`;
+
+    s = s.substring(0, replaceStart) + replacement + s.substring(replaceEnd);
+    searchIdx = replaceStart + replacement.length;
   }
 
-  const soal = raw.Soal || raw.soal || raw.question || raw.pertanyaan || raw.text || raw.Teks || '';
-  const nomor = Number(raw.Nomor || raw.nomor || raw.no || raw.No || index + 1) || (index + 1);
-
-  let jenis = 'PG';
-  const rawJenis = String(raw.Jenis_Soal || raw.jenis_soal || raw.jenisSoal || raw.type || raw.Type || '').toUpperCase().trim();
-  if (['PG', 'ESSAY', 'PILIHAN ESSAY', 'PGK', 'MENGURUTKAN'].includes(rawJenis)) {
-    jenis = rawJenis;
-  } else if (rawJenis.includes('KOMPLEKS') || rawJenis.includes('PGK')) {
-    jenis = 'PGK';
-  } else if (rawJenis.includes('PILIHAN') && rawJenis.includes('ESSAY')) {
-    jenis = 'PILIHAN ESSAY';
-  } else if (rawJenis.includes('ESSAY') || rawJenis.includes('ESAI')) {
-    jenis = 'ESSAY';
-  } else if (rawJenis.includes('URUT') || rawJenis.includes('MENGURUTKAN')) {
-    jenis = 'MENGURUTKAN';
-  }
+  return s;
+}
 
 // Helper untuk mencari posisi indeks awal opsi A, B, C di dalam teks (baik multiline maupun inline)
 function findOptionsStartIndex(text: string): number {
@@ -429,7 +639,7 @@ function normalizeQuestionObject(raw: any, index: number) {
     let s = String(val).trim();
     // Bersihkan awalan huruf opsi redundan seperti "A. ", "A) ", "(A) ", "A: "
     s = s.replace(/^(?:[\[\(]?[A-Fa-f][\]\)\.\:]\s*|\-\s*)/, '').trim();
-    return s;
+    return normalizeQuickChartInText(s);
   };
 
   let optA = raw.Pilihan_A ?? raw.pilihan_a ?? raw.pilihanA ?? raw.opsi_a ?? raw.opsiA ?? raw.A ?? raw.a ?? '';
@@ -498,8 +708,8 @@ function normalizeQuestionObject(raw: any, index: number) {
     Nilai: Number(raw.Nilai || raw.nilai || 10) || 10,
     Nama_Materi: String(raw.Nama_Materi || raw.nama_materi || raw.materi || raw.topik || ''),
     Judul_Referensi: cleanIsiRef ? String(raw.Judul_Referensi || raw.judul_referensi || raw.judul || '') : '',
-    Isi_Referensi: cleanIsiRef,
-    Soal: cleanSoalResult || effectiveSoal || String(soal),
+    Isi_Referensi: normalizeQuickChartInText(cleanIsiRef),
+    Soal: normalizeQuickChartInText(cleanSoalResult || effectiveSoal || String(soal)),
     File_Audio_Video: '',
     Pilihan_A: optA !== '' ? cleanOption(optA) : undefined,
     Pilihan_B: optB !== '' ? cleanOption(optB) : undefined,
@@ -508,7 +718,7 @@ function normalizeQuestionObject(raw: any, index: number) {
     Pilihan_E: optE !== '' ? cleanOption(optE) : undefined,
     Pilihan_F: optF !== '' ? cleanOption(optF) : undefined,
     Kunci_Jawaban_Non_Essay: cleanKunci,
-    Jawaban_Essay: String(essay)
+    Jawaban_Essay: normalizeQuickChartInText(String(essay))
   };
 }
 
@@ -1084,7 +1294,7 @@ ${studentMisconception ? '\n- WAJIB Miskonsepsi Siswa: Rancang pengecoh agar mer
 ${noExtraExplanation ? '\n- DILARANG Penjelasan Ekstra di Pilihan: Pada pilihan opsi jawaban, tuliskan HANYA poin jawaban inti tanpa menambahkan kata "karena" atau alasan di dalam teks opsi.' : ''}
 ${supportEquation ? '\n- WAJIB sertakan soal yang mengandung RUMUS (Equation) matematika/fisika/kimia dengan LaTeX ($...$ atau $$...$$).' : '\n- DILARANG menggunakan RUMUS (Equation) LaTeX.'}
 ${supportImage ? '\n- WAJIB sertakan GAMBAR ilustrasi pada 1 sampai 2 soal menggunakan markdown: ![deskripsi](https://image.pollinations.ai/prompt/detailed-description-in-english?width=400&height=300&nologo=true).' : '\n- DILARANG menyertakan GAMBAR/ilustrasi markdown.'}
-${supportGraph ? '\n- WAJIB sertakan soal dengan analisis GRAFIK menggunakan QuickChart valid: ![Grafik](https://quickchart.io/chart?bkg=white&w=500&h=300&c={...}). Dilarang memakai tanda kurung () di label chart.' : '\n- DILARANG membuat soal berbasis grafik.'}
+${supportGraph ? '\n- WAJIB sertakan soal dengan analisis GRAFIK menggunakan QuickChart valid dalam format markdown: ![Grafik](https://quickchart.io/chart?bkg=white&w=500&h=300&format=png&c={type:\'bar\',data:{labels:[\'A\',\'B\',\'C\'],datasets:[{label:\'Nilai\',data:[30,50,80]}]}}). Pastikan nilai data berupa angka murni dan DILARANG memakai tanda kurung () di dalam label atau judul chart.' : '\n- DILARANG membuat soal berbasis grafik.'}
 ${supportDiagram ? '\n- WAJIB sertakan soal dengan DIAGRAM siklus/alur proses menggunakan blok ```mermaid ... ``` atau markdown ![Diagram](https://mermaid.ink/img/...).' : '\n- DILARANG membuat soal berbasis diagram.'}
 ${additionalInstructions ? `\n=== INSTRUKSI KHUSUS TAMBAHAN ===\n${additionalInstructions}` : ''}
 
